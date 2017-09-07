@@ -272,6 +272,7 @@ class DataLoader(DataAccess):
             for gen_srid in to_generate:
                 self.reproject(source_id, column.name, gen_srid)
         self.session.commit()
+        return self.get_table_info(table_name)
 
     def add_geolinkage(self, geo_table_name, geo_column, attr_table_name, attr_column):
         GeometryLinkage = self.classes['geometry_linkage']
