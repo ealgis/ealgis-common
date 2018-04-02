@@ -188,7 +188,7 @@ class DataLoader(DataAccess):
 
     def set_table_metadata(self, table_name, meta_dict):
         ti = self.get_table_info(table_name)
-        ti.metadata = meta_dict
+        ti.metadata_json = meta_dict
         self.session.commit()
 
     def register_columns(self, table_name, columns):
@@ -198,7 +198,7 @@ class DataLoader(DataAccess):
                 self.tables['column_info'].insert().values(
                     name=column_name,
                     table_info_id=ti.id,
-                    metadata=meta_dict))
+                    metadata_json=meta_dict))
         self.session.commit()
 
     def register_column(self, table_name, column_name, meta_dict):
