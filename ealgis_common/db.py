@@ -1,5 +1,3 @@
-
-import json
 from sqlalchemy import inspect
 from geoalchemy2.types import Geometry
 from sqlalchemy import create_engine
@@ -16,6 +14,129 @@ from .util import make_logger
 
 Base = declarative_base()
 logger = make_logger(__name__)
+
+
+class DataAccess:
+    def __init__(self, engine, schema_name):
+        self._table_names_used = Counter()
+        #
+        self.engine = engine
+        Session = sessionmaker()
+        Session.configure(bind=self.engine)
+        self.session = Session()
+        self._schema_name = schema_name
+        #
+        _, tables = store.load_schema(schema_name)
+        self.tables = dict((t.name, t) for t in tables)
+        self.classes = dict((t.name, self.get_table_class(t.name)) for t in tables)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, type, value, traceback):
+        self.session.close()
+        del self.engine
+
+    @classmethod
+    def make_engine(cls, db_name):
+        return create_engine(cls.make_connection_string(db_name))
+
+    @classmethod
+    def make_connection_string(cls, db_name):
+        dbuser = os.environ.get('DB_USERNAME')
+        dbpassword = os.environ.get('DB_PASSWORD')
+        dbhost = os.environ.get('DB_HOST')
+        return 'postgres://%s:%s@%s:5432/%s' % (dbuser, dbpassword, dbhost, db_name)
+
+    def engineurl(self):
+        return self.engine.engine.url
+
+    def dbname(self):
+        return self.engine.engine.url.database
+
+    def dbhost(self):
+        return self.engine.engine.url.host
+
+    def dbuser(self):
+        return self.engine.engine.url.username
+
+    def dbport(self):
+        return self.engine.engine.url.port
+
+    def dbschema(self):
+        return self._schema_name
+
+    def dbpassword(self):
+        return self.engine.engine.url.password
+    
+    def access_schema(self, schema_name):
+        return DataAccess(self.engine, schema_name)
+
+    def have_table(self, table_name):
+        try:
+            self.get_table(table_name)
+            return True
+        except sqlalchemy.exc.NoSuchTableError:
+            return False
+
+    def get_table(self, table_name):
+        return sqlalchemy.Table(table_name, sqlalchemy.MetaData(), schema=self._schema_name, autoload=True, autoload_with=self.engine.engine)
+
+    def get_table_names(self):
+        "this is a more lightweight approach to getting table names from the db that avoids all of that messy reflection"
+        "c.f. http://docs.sqlalchemy.org/en/rel_0_9/core/reflection.html?highlight=inspector#fine-grained-reflection-with-inspector"
+        inspector = inspect(self.engine.engine)
+        return inspector.get_table_names(schema=self._schema_name)
+
+    def get_table_class(self, table_name):
+        # nothing bad happens if there is a clash, but it produces warnings
+        self._table_names_used[table_name] += 1
+        nm = "Table_%s_%d" % (table_name, self._table_names_used[table_name])
+        return type(nm, (Base,), {'__table__': self.get_table(table_name)})
+
+    def find_geom_column(self, table_name):
+        info = self.get_table(table_name)
+        geom_columns = []
+
+        for column in info.columns:
+            # GeoAlchemy2 lets us find geometry columns
+            if isinstance(column.type, Geometry):
+                geom_columns.append(column)
+
+        if len(geom_columns) > 1:
+            raise Exception("more than one geometry column?")
+        return geom_columns[0]
+
+    def get_table_info(self, table_name):
+        TableInfo = self.classes['table_info']
+        try:
+            return self.session.query(TableInfo).filter(TableInfo.name == table_name).one()
+        except sqlalchemy.orm.exc.NoResultFound:
+            raise Exception("could not retrieve table_info row for `{}'".format(table_name))
+
+    def get_geometry_source(self, table_name):
+        TableInfo = self.classes['table_info']
+        GeometrySource = self.classes['geometry_source']
+        try:
+            return self.session.query(GeometrySource).join(TableInfo, TableInfo.id == GeometrySource.table_info_id).filter(TableInfo.name == table_name).one()
+        except sqlalchemy.orm.exc.NoResultFound:
+            raise Exception("could not retrieve geometry_source row for `{}'".format(table_name))
+
+    def get_geometry_source_by_id(self, id):
+        GeometrySource = self.classes['geometry_source']
+        try:
+            return self.session.query(GeometrySource).filter(GeometrySource.id == id).one()
+        except sqlalchemy.orm.exc.NoResultFound:
+            raise Exception("could not retrieve geometry_source row for id `{}'".format(id))
+
+    def get_geometry_relation(self, from_source, to_source):
+        GeometryRelation = self.classes['geometry_relation']
+        try:
+            return self.session.query(GeometryRelation).filter(
+                GeometryRelation.geo_source_id == from_source.id,
+                GeometryRelation.overlaps_with_id == to_source.id).one()
+        except sqlalchemy.orm.exc.NoResultFound:
+            return None
 
 
 class DataLoaderFactory:
@@ -58,113 +179,12 @@ class DataLoaderFactory:
                     print("couldn't load: %s (%s)" % (extension, e))
 
 
-class DataAccess:
-    def __init__(self, engine, schema_name):
-        self.engine = engine
-        Session = sessionmaker()
-        Session.configure(bind=self.engine)
-        self.session = Session()
-        self._schema_name = schema_name
-        self._table_names_used = Counter()
-
-    @classmethod
-    def make_engine(cls, db_name):
-        return create_engine(cls.make_connection_string(db_name))
-
-    @classmethod
-    def make_connection_string(cls, db_name):
-        dbuser = os.environ.get('DB_USERNAME')
-        dbpassword = os.environ.get('DB_PASSWORD')
-        dbhost = os.environ.get('DB_HOST')
-        return 'postgres://%s:%s@%s:5432/%s' % (dbuser, dbpassword, dbhost, db_name)
-
-    def engineurl(self):
-        return self.engine.engine.url
-
-    def dbname(self):
-        return self.engine.engine.url.database
-
-    def dbhost(self):
-        return self.engine.engine.url.host
-
-    def dbuser(self):
-        return self.engine.engine.url.username
-
-    def dbport(self):
-        return self.engine.engine.url.port
-
-    def dbschema(self):
-        return self._schema_name
-
-    def dbpassword(self):
-        return self.engine.engine.url.password
-
-    def have_table(self, table_name):
-        try:
-            self.get_table(table_name)
-            return True
-        except sqlalchemy.exc.NoSuchTableError:
-            return False
-
-    def get_table(self, table_name):
-        return sqlalchemy.Table(table_name, sqlalchemy.MetaData(), schema=self._schema_name, autoload=True, autoload_with=self.engine.engine)
-
-    def get_table_names(self):
-        "this is a more lightweight approach to getting table names from the db that avoids all of that messy reflection"
-        "c.f. http://docs.sqlalchemy.org/en/rel_0_9/core/reflection.html?highlight=inspector#fine-grained-reflection-with-inspector"
-        inspector = inspect(self.engine.engine)
-        return inspector.get_table_names(schema=self._schema_name)
-
-    def get_table_class(self, table_name):
-        # nothing bad happens if there is a clash, but it produces warnings
-        self._table_names_used[table_name] += 1
-        nm = "Table_%s_%d" % (table_name, self._table_names_used[table_name])
-        return type(nm, (Base,), {'__table__': self.get_table(table_name)})
-
-    def find_geom_column(self, table_name):
-        info = self.get_table(table_name)
-        geom_columns = []
-
-        for column in info.columns:
-            # GeoAlchemy2 lets us find geometry columns
-            if isinstance(column.type, Geometry):
-                geom_columns.append(column)
-
-        if len(geom_columns) > 1:
-            raise Exception("more than one geometry column?")
-        return geom_columns[0]
-
-    def get_table_info(self, table_name):
-        TableInfo = self.classes['table_info']
-        return self.session.query(TableInfo).filter(TableInfo.name == table_name).one()
-
-    def get_geometry_source(self, table_name):
-        TableInfo = self.classes['table_info']
-        GeometrySource = self.classes['geometry_source']
-        return self.session.query(GeometrySource).join(GeometrySource.table_info).filter(TableInfo.name == table_name).one()
-
-    def get_geometry_source_by_id(self, id):
-        GeometrySource = self.classes['geometry_source']
-        return self.session.query(GeometrySource).filter(GeometrySource.id == id).one()
-
-    def get_geometry_relation(self, from_source, to_source):
-        GeometryRelation = self.classes['geometry_relation']
-        try:
-            return self.session.query(GeometryRelation).filter(
-                GeometryRelation.geo_source_id == from_source.id,
-                GeometryRelation.overlaps_with_id == to_source.id).one()
-        except sqlalchemy.orm.exc.NoResultFound:
-            return None
-
-
 class DataLoader(DataAccess):
     def __init__(self, engine, schema_name, mandatory_srids=None):
-        super(DataLoader, self).__init__(engine, schema_name)
         self._mandatory_srids = mandatory_srids
         metadata, tables = store.load_schema(schema_name)
-        metadata.create_all(self.engine)
-        self.tables = dict((t.name, t) for t in tables)
-        self.classes = dict((t.name, self.get_table_class(t.name)) for t in tables)
+        metadata.create_all(engine)
+        super(DataLoader, self).__init__(engine, schema_name)
 
     def set_table_metadata(self, table_name, meta_dict):
         ti = self.get_table_info(table_name)
@@ -223,9 +243,9 @@ class DataLoader(DataAccess):
                         to_srid)
                 }))
         self.session.execute(
-            self.tables['geometry_source_column'].insert().values(
+            self.tables['geometry_source_projection'].insert().values(
                 geometry_source_id=geometry_source_id,
-                column=new_column,
+                geometry_column=new_column,
                 srid=to_srid))
         # make a geometry index on this
         self.session.commit()
@@ -260,11 +280,11 @@ class DataLoader(DataAccess):
                 self.tables['geometry_source'].insert().values(
                     table_info_id=table_info_id,
                     geometry_type=geomtype,
-                    gid=gid)).inserted_primary_key
+                    gid_column=gid)).inserted_primary_key
             self.session.execute(
-                self.tables['geometry_source_column'].insert().values(
+                self.tables['geometry_source_projection'].insert().values(
                     geometry_source_id=source_id,
-                    column=column.name,
+                    geometry_column=column.name,
                     srid=srid))
             to_generate = set(self._mandatory_srids)
             if srid in to_generate:
@@ -274,14 +294,14 @@ class DataLoader(DataAccess):
         self.session.commit()
         return self.get_table_info(table_name)
 
-    def add_geolinkage(self, geo_table_name, geo_column, attr_table_name, attr_column):
-        GeometryLinkage = self.classes['geometry_linkage']
-        geo_source = self.get_geometry_source(geo_table_name)
+    def add_geolinkage(self, geo_access, geo_table_name, geo_column, attr_table_name, attr_column):
         attr_table = self.get_table_info(attr_table_name)
+        geo_source = geo_access.get_geometry_source(geo_table_name)
+        GeometryLinkage = self.classes['geometry_linkage']
         linkage = GeometryLinkage(
-            geometry_source=geo_source,
-            geo_column=geo_column,
-            attribute_table=attr_table,
+            geometry_source_schema_name=geo_access._schema_name,
+            geometry_source_id=geo_source.id,
+            attr_table_id=attr_table.id,
             attr_column=attr_column)
         self.session.add(linkage)
         self.session.commit()
