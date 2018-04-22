@@ -385,6 +385,29 @@ class DataAccess():
     def get_column_info_by_name(self, column_name, geo_source_id=None):
         return self.get_column_info_by_names([column_name], geo_source_id)
 
+    def search_columns(self, search_terms, search_terms_excluded, geo_source_id=None):
+        GeometryLinkage = self.classes['geometry_linkage']
+        TableInfo = self.classes['table_info']
+        ColumnInfo = self.classes['column_info']
+        try:
+            query = self.session.query(ColumnInfo.table_info_id)\
+                .join(TableInfo, ColumnInfo.table_info_id == TableInfo.id)\
+                .join(GeometryLinkage, TableInfo.id == GeometryLinkage.attr_table_id)\
+                .filter(GeometryLinkage.geometry_source_id == geo_source_id)
+
+            # Further filter the resultset by one or more search terms (e.g. "diploma,advaned,females")
+            for term in search_terms:
+                query = query.filter(ColumnInfo.metadata_json["type"].astext.ilike("%{}%".format(term)))
+
+            # Further filter the resultset by one or more excluded search terms (e.g. "diploma,advaned,females")
+            for term in search_terms_excluded:
+                query = query.filter(not_(ColumnInfo.metadata_json["type"].astext.ilike("%{}%".format(term))))
+
+            tableIds = query.distinct().all()
+            return self.get_table_info_by_ids(tableIds)
+        except sqlalchemy.orm.exc.NoResultFound:
+            raise Exception("could not search columns")
+
     def fetch_columns(self, tableinfo_id=None):
         GeometryLinkage = self.classes['geometry_linkage']
         ColumnInfo = self.classes['column_info']
