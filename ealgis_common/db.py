@@ -1,3 +1,4 @@
+from functools import lru_cache
 from sqlalchemy import inspect
 from geoalchemy2.types import Geometry
 from sqlalchemy import create_engine
