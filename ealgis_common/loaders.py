@@ -4,6 +4,7 @@ import zipfile
 import sqlalchemy
 import subprocess
 import glob
+from shutil import rmtree
 from .util import piperun, table_name_valid, make_logger
 
 from .seqclassifier import SequenceClassifier
@@ -65,6 +66,7 @@ class ZipAccess(DirectoryAccess):
         return super(ZipAccess, self).glob(filename)
 
     def __exit__(self, type, value, traceback):
+        rmtree(self._directory)
         return super(ZipAccess, self).__exit__(type, value, traceback)
 
 
@@ -141,7 +143,8 @@ class ShapeLoader(GeoDataLoader):
 
 
 class MapInfoLoader(GeoDataLoader):
-    def __init__(self, filename, srid, table_name=None):
+    def __init__(self, schema_name, filename, srid, table_name=None):
+        self.schema_name = schema_name
         self.filename = filename
         self.srid = srid
         self.table_name = table_name or GeoDataLoader.generate_table_name(MapInfoLoader.get_file_base(filename))
@@ -155,7 +158,7 @@ class MapInfoLoader(GeoDataLoader):
             'PG:dbname=\'%s\' host=\'%s\' port=\'%d\' user=\'%s\' password=\'%s\'' % (eal.dbname(), eal.dbhost(), eal.dbport(), eal.dbuser(), eal.dbpassword()),
             self.filename,
             '-nln', self.table_name,
-            '-lco', 'fid=gid']
+            '-lco', 'fid=gid', '-lco', 'schema=%s' % self.schema_name]
         logger.debug(ogr_cmd)
         try:
             subprocess.check_call(ogr_cmd)
