@@ -6,6 +6,7 @@ from sqlalchemy_utils import database_exists, create_database, drop_database
 from sqlalchemy.schema import CreateSchema
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.sql import not_
 from ealgis_data_schema.schema_v1 import store
 from collections import Counter
 from .util import cmdrun
@@ -44,9 +45,7 @@ atexit.register(exit_handler)
 
 
 class DataAccess():
-    def __init__(self, engine, schema_name=None):
-        self._table_names_used = Counter()
-        #
+    def __init__(self, engine, schema_name):
         self.engine = engine
         Session = sessionmaker()
         Session.configure(bind=self.engine)
@@ -57,11 +56,12 @@ class DataAccess():
         self.schemas = self.inspector.get_schema_names()
         #
         self.classes = {}
-        if schema_name is not None:
-            _, tables = store.load_schema(schema_name)
-            self.tables = dict((t.name, t) for t in tables)
-            #
-            self.classes = dict((t.name, self.get_table_class(t.name)) for t in tables)
+        self.class_version = Counter()
+        #
+        _, tables = store.load_schema(schema_name)
+        self.tables = dict((t.name, t) for t in tables)
+        self.class_names_used = Counter()
+        self.classes = dict((t.name, self.get_table_class(t.name)) for t in tables)
 
     def __enter__(self):
         return self
@@ -189,12 +189,16 @@ class DataAccess():
         return inspector.get_table_names(schema=self._schema_name)
 
     def get_table_class(self, table_name):
-        # DataAccess operates on a per-schema basis now, so we don't need to worry about clashing of table names
-        if table_name in self.classes:
-            return self.classes[table_name]
-        nm = "Table_%s.%s_%d" % (self._schema_name, table_name, 1)
+        """
+        table definitions may change over time (as the result of the addition of columns, ...)
+        hence we do not cache the reflected class instances this function creates
+        """
+        self.class_names_used[table_name] += 1
+        count = self.class_names_used[table_name]
+        nm = "Table_{}.{}".format(self._schema_name, table_name)
+        if count > 1:
+            nm = '{}_{}'.format(nm, count)
         tc = type(nm, (Base,), {'__table__': self.get_table(table_name)})
-        self.classes[table_name] = tc
         return tc
 
     def get_table_class_by_id(self, table_id):
@@ -270,13 +274,15 @@ class DataAccess():
             raise Exception("no non-geometry columns found for '{table_name}'?".format(table_name=table_name))
         return columns
 
-    def find_geom_column(self, table_name, srid):
+    def find_geom_column(self, table_name, srid=None):
         info = self.get_table(table_name)
         geom_columns = []
 
         for column in info.columns:
             # GeoAlchemy2 lets us find geometry columns
-            if isinstance(column.type, Geometry):
+            if not isinstance(column.type, Geometry):
+                continue
+            if srid is None or column.type.srid == srid:
                 geom_columns.append(column)
 
         if len(geom_columns) > 1:
@@ -622,6 +628,9 @@ class DataLoader(DataAccess):
             column = self.find_geom_column(table_name)
             if column is None:
                 raise Exception("Cannot automatically determine geometry column for `%s'" % table_name)
+            # if we don't have an SRID yet, infer from the column
+            if srid is None:
+                srid = column.type.srid
             # figure out what type of geometry this is
             qstr = 'SELECT geometrytype(%s) as geomtype FROM %s.%s WHERE %s IS NOT null GROUP BY geomtype' % \
                 (column.name, self._schema_name, table_name, column.name)

@@ -143,6 +143,40 @@ class ShapeLoader(GeoDataLoader):
 
 
 class MapInfoLoader(GeoDataLoader):
+    def __init__(self, schema_name, filename, table_name=None):
+        self.schema_name = schema_name
+        self.filename = filename
+        self.table_name = table_name or GeoDataLoader.generate_table_name(MapInfoLoader.get_file_base(filename))
+        if not table_name_valid(self.table_name):
+            raise LoaderException("table name is `%s' is invalid." % self.table_name)
+
+    def load(self, eal):
+        ogr_cmd = [
+            'ogr2ogr',
+            '-f', 'postgresql',
+            'PG:dbname=\'{}\' host=\'{}\' port=\'{}\' user=\'{}\' password=\'{}\''.format(
+                eal.dbname(),
+                eal.dbhost(),
+                eal.dbport(),
+                eal.dbuser(),
+                eal.dbpassword()),
+            self.filename,
+            '-nln', self.table_name,
+            '-lco', 'fid=gid',
+            '-lco', 'schema={}'.format(self.schema_name),
+            '-lco', 'geometry_name=geom',
+        ]
+        logger.debug(ogr_cmd)
+        try:
+            subprocess.check_call(ogr_cmd)
+        except subprocess.CalledProcessError:
+            raise LoaderException("load of %s failed." % os.path.basename(self.filename))
+        # make the meta info
+        logger.info("registering, table name is: %s" % (self.table_name))
+        eal.register_table(self.table_name, geom=True, gid='gid')
+
+
+class KMLLoader(GeoDataLoader):
     def __init__(self, schema_name, filename, srid, table_name=None):
         self.schema_name = schema_name
         self.filename = filename
@@ -155,37 +189,17 @@ class MapInfoLoader(GeoDataLoader):
         ogr_cmd = [
             'ogr2ogr',
             '-f', 'postgresql',
-            'PG:dbname=\'%s\' host=\'%s\' port=\'%d\' user=\'%s\' password=\'%s\'' % (eal.dbname(), eal.dbhost(), eal.dbport(), eal.dbuser(), eal.dbpassword()),
-            self.filename,
-            '-nln', self.table_name,
-            '-lco', 'fid=gid', '-lco', 'schema=%s' % self.schema_name]
-        logger.debug(ogr_cmd)
-        try:
-            subprocess.check_call(ogr_cmd)
-        except subprocess.CalledProcessError:
-            raise LoaderException("load of %s failed." % os.path.basename(self.filename))
-        # make the meta info
-        logger.info("registering, table name is: %s" % (self.table_name))
-        eal.register_table(self.table_name, geom=True, srid=self.srid, gid='gid')
-
-
-class KMLLoader(GeoDataLoader):
-    def __init__(self, filename, srid, table_name=None):
-        self.filename = filename
-        self.srid = srid
-        self.table_name = table_name or GeoDataLoader.generate_table_name(MapInfoLoader.get_file_base(filename))
-        if not table_name_valid(self.table_name):
-            raise LoaderException("table name is `%s' is invalid." % self.table_name)
-
-    def load(self, eal):
-        ogr_cmd = [
-            'ogr2ogr',
-            '-f', 'postgresql',
-            'PG:dbname=\'%s\' host=\'%s\' port=\'%d\' user=\'%s\' password=\'%s\'' % (eal.dbname(), eal.dbhost(), eal.dbport(), eal.dbuser(), eal.dbpassword()),
+            'PG:dbname=\'{}\' host=\'{}\' port=\'{}\' user=\'{}\' password=\'{}\''.format(
+                eal.dbname(),
+                eal.dbhost(),
+                eal.dbport(),
+                eal.dbuser(),
+                eal.dbpassword()),
             self.filename,
             '-nln', self.table_name,
             '-append',
-            '-lco', 'fid=gid']
+            '-lco', 'fid=gid:schema={}:geometry_name=geom'.format(self.schema_name)
+        ]
         logger.debug(ogr_cmd)
         try:
             subprocess.check_call(ogr_cmd)
