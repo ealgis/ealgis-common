@@ -3,7 +3,9 @@ import hashlib
 import zipfile
 import sqlalchemy
 import subprocess
+import fnmatch
 import glob
+import re
 from shutil import rmtree
 from .util import piperun, table_name_valid, make_logger
 
@@ -52,8 +54,13 @@ class ZipAccess(DirectoryAccess):
             zf_path = self._zf_path
         with open(zf_path, 'rb') as fd:
             with zipfile.ZipFile(fd) as zf:
-                zf.extractall(self.getdir())
+                zf.extractall(super().getdir())
         self._unpacked = True
+
+    def getdir(self):
+        if not self._unpacked:
+            self._unpack()
+        return super().getdir()
 
     def get(self, filename):
         if not self._unpacked:
@@ -66,7 +73,8 @@ class ZipAccess(DirectoryAccess):
         return super(ZipAccess, self).glob(filename)
 
     def __exit__(self, type, value, traceback):
-        rmtree(self._directory)
+        if self._unpacked:
+            rmtree(self._directory)
         return super(ZipAccess, self).__exit__(type, value, traceback)
 
 
@@ -143,12 +151,35 @@ class ShapeLoader(GeoDataLoader):
 
 
 class MapInfoLoader(GeoDataLoader):
-    def __init__(self, schema_name, filename, table_name=None):
+    tab_re = re.compile(fnmatch.translate("*.tab"), re.IGNORECASE)
+    mif_re = re.compile(fnmatch.translate("*.mif"), re.IGNORECASE)
+
+    def __init__(self, schema_name, mipath, table_name=None):
         self.schema_name = schema_name
-        self.filename = filename
+        self.filename = MapInfoLoader.get_filename(mipath)
         self.table_name = table_name or GeoDataLoader.generate_table_name(MapInfoLoader.get_file_base(filename))
         if not table_name_valid(self.table_name):
             raise LoaderException("table name is `%s' is invalid." % self.table_name)
+
+    @classmethod
+    def get_filename(cls, mipath):
+        "find the TAB of MIF file within the specified path, to be loaded"
+
+        def one_match(glob_re, files):
+            matches = [t for t in files if glob_re.match(t)]
+            if len(matches) > 1:
+                raise Exception("more than one MapInfo file in {}: {}".format(mipath, matches))
+            elif len(matches) == 1:
+                return os.path.join(mipath, matches[0])
+
+        files = os.listdir(mipath)
+        candidates = [s for s in [one_match(t, files) for t in (cls.mif_re, cls.tab_re)] if s]
+        if len(candidates) > 1:
+            raise Exception("more than one MapInfo file in {}: {}".format(mipath, candidates))
+        elif len(candidates) == 1:
+            return candidates[0]
+        else:
+            raise Exception("no mapinfo data found in {}: {}".format(mipath, files))
 
     def load(self, eal):
         ogr_cmd = [
@@ -177,10 +208,10 @@ class MapInfoLoader(GeoDataLoader):
 
 
 class KMLLoader(GeoDataLoader):
-    def __init__(self, schema_name, filename, srid, table_name=None):
+    def __init__(self, schema_name, filename, table_name=None):
+        self.srid = 4326  # WGS84
         self.schema_name = schema_name
         self.filename = filename
-        self.srid = srid
         self.table_name = table_name or GeoDataLoader.generate_table_name(MapInfoLoader.get_file_base(filename))
         if not table_name_valid(self.table_name):
             raise LoaderException("table name is `%s' is invalid." % self.table_name)
@@ -198,18 +229,15 @@ class KMLLoader(GeoDataLoader):
             self.filename,
             '-nln', self.table_name,
             '-append',
-            '-lco', 'fid=gid:schema={}:geometry_name=geom'.format(self.schema_name)
+            '-lco', 'fid=gid',
+            '-lco', 'schema={}'.format(self.schema_name),
+            '-lco', 'geometry_name=geom',
         ]
         logger.debug(ogr_cmd)
         try:
             subprocess.check_call(ogr_cmd)
         except subprocess.CalledProcessError:
             raise LoaderException("load of %s failed." % os.path.basename(self.filename))
-        # delete any pins or whatever
-        cls = eal.get_table_class(self.table_name)
-        for obj in eal.db.session.query(cls).filter(sqlalchemy.func.geometrytype(cls.wkb_geometry) != 'MULTIPOLYGON'):
-            eal.db.session.delete(obj)
-        eal.db.session.commit()
         # make the meta info
         logger.debug("registering, table name is: %s" % (self.table_name))
         eal.register_table(self.table_name, geom=True, srid=self.srid, gid='gid')
