@@ -44,6 +44,51 @@ def exit_handler():
 atexit.register(exit_handler)
 
 
+class SchemaInformation():
+    # PostgreSQL and PostGIS system schemas
+    system_schemas = ["information_schema", "tiger", "tiger_data", "topology", "public"]
+
+    def __init__(self, engine):
+        self.inspector = inspect(engine)
+        self.compliant = [
+            t for t in self.inspector.get_schema_names() if
+            t not in self.system_schemas and self._has_required_ealgis_tables(t)]
+
+    @classmethod
+    def _is_system_schema(cls, schema_name):
+        return schema_name in cls.system_schemas
+
+    def _has_required_ealgis_tables(self, schema_name):
+        required_tables = ["ealgis_metadata", "table_info", "column_info", "geometry_linkage", "geometry_source", "geometry_source_projection"]
+        table_names = self.inspector.get_table_names(schema=schema_name)
+        return set(required_tables).issubset(table_names)
+
+    @lru_cache(maxsize=None)
+    def get_geometry_schemas(self):
+        def is_geometry_schema(schema_name):
+            db = broker.Provide(schema_name)
+            GeometrySource = db.get_table_class("geometry_source")
+            # The schema must have at least some rows in geometry_sources
+            if db.session.query(GeometrySource).first() is not None:
+                return True
+            return False
+
+        return [t for t in self.comploiant if is_geometry_schema(t)]
+
+    @lru_cache(maxsize=None)
+    def get_ealgis_schemas(self):
+        def is_data_schema(schema_name):
+            db = broker.Provide(schema_name)
+            ColumnInfo = db.get_table_class("column_info")
+            # The schema must have at least some rows in column_info
+            # If not, it's probably just a geometry/shapes schema
+            if db.session.query(ColumnInfo).first() is not None:
+                return True
+            return False
+
+        return [t for t in self.compliant if is_data_schema(t)]
+
+
 class DataAccess():
     def __init__(self, engine, schema_name):
         self.engine = engine
@@ -51,9 +96,6 @@ class DataAccess():
         Session.configure(bind=self.engine)
         self.session = Session()
         self._schema_name = schema_name
-        #
-        self.inspector = inspect(self.engine)
-        self.schemas = self.inspector.get_schema_names()
         #
         self.classes = {}
         self.class_version = Counter()
@@ -74,15 +116,17 @@ class DataAccess():
         del self.engine
 
     @classmethod
-    def make_engine(cls, db_name=os.environ.get("DB_NAME")):
-        return create_engine(cls.make_connection_string(db_name))
+    def make_engine(cls, **kwargs):
+        return create_engine(cls.make_connection_string(**kwargs))
 
     @classmethod
-    def make_connection_string(cls, db_name):
-        dbuser = os.environ.get('DB_USERNAME')
-        dbpassword = os.environ.get('DB_PASSWORD')
-        dbhost = os.environ.get('DB_HOST')
-        return 'postgres://%s:%s@%s:5432/%s' % (dbuser, dbpassword, dbhost, db_name)
+    def make_connection_string(cls, db_host=None, db_name=None, db_user=None, db_password=None):
+        ge = os.environ.get
+        db_host = db_host or ge('DATASTORE_HOST') or ge('DB_HOST')
+        db_name = db_name or ge('DATASTORE_NAME') or ge('DB_NAME')
+        db_user = db_user or ge('DATASTORE_USERNAME') or ge('DB_USERNAME')
+        db_password = db_password or ge('DATASTORE_PASSWORD') or ge('DB_PASSWORD')
+        return 'postgres://{}:{}@{}:5432/{}'.format(db_user, db_password, db_host, db_name)
 
     def engineurl(self):
         return self.engine.engine.url
@@ -107,66 +151,6 @@ class DataAccess():
 
     def access_schema(self, schema_name):
         return DataAccess(self.engine, schema_name)
-
-    '''
-    Schema Accessors
-    '''
-
-    def get_schemas(self):
-        return self.schemas
-
-    def is_system_schema(self, schema_name):
-        # PostgreSQL and PostGIS system schemas
-        system_schemas = ["information_schema", "tiger", "tiger_data", "topology", "public"]
-        return schema_name in system_schemas
-
-    def has_required_ealgis_tables(self, schema_name):
-        required_tables = ["ealgis_metadata", "table_info", "column_info", "geometry_linkage", "geometry_source", "geometry_source_projection"]
-        table_names = self.inspector.get_table_names(schema=schema_name)
-        return set(required_tables).issubset(table_names)
-
-    @lru_cache(maxsize=None)
-    def get_geometry_schemas(self):
-        def is_compliant_schema(schema_name):
-            """determines if a given schema is EAlGIS-compliant"""
-
-            if self.has_required_ealgis_tables(schema_name):
-                db = broker.Provide(schema_name)
-                GeometrySource = db.get_table_class("geometry_source")
-
-                # The schema must have at least some rows in geometry_sources
-                if db.session.query(GeometrySource).first() is not None:
-                    return True
-            return False
-
-        schemas = []
-        for schema_name in self.get_schemas():
-            if self.is_system_schema(schema_name) is False:
-                if is_compliant_schema(schema_name):
-                    schemas.append(schema_name)
-        return schemas
-
-    @lru_cache(maxsize=None)
-    def get_ealgis_schemas(self):
-        def is_compliant_schema(schema_name):
-            """determines if a given schema is EAlGIS-compliant"""
-
-            if self.has_required_ealgis_tables(schema_name):
-                db = broker.Provide(schema_name)
-                ColumnInfo = db.get_table_class("column_info")
-
-                # The schema must have at least some rows in column_info
-                # If not, it's probably just a geometry/shapes schema
-                if db.session.query(ColumnInfo).first() is not None:
-                    return True
-            return False
-
-        schemas = []
-        for schema_name in self.get_schemas():
-            if self.is_system_schema(schema_name) is False:
-                if is_compliant_schema(schema_name):
-                    schemas.append(schema_name)
-        return schemas
 
     '''
     Database Table Accessors
@@ -502,9 +486,9 @@ class DataAccess():
 
 
 class DataLoaderFactory:
-    def __init__(self, db_name, clean=True):
+    def __init__(self, clean=True, **kwargs):
         # create database and connect
-        connection_string = DataAccess.make_connection_string(db_name)
+        connection_string = DataAccess.make_connection_string(**kwargs)
         self._engine = create_engine(connection_string)
         if self._create_database(connection_string, clean):
             self._create_extensions(connection_string)
