@@ -620,6 +620,38 @@ class DataLoader(DataAccess):
             new_column))
         self.session.commit()
 
+    def add_mvt_area_column(self, geometry_source_id, column):
+        # add a column with the square root of geometry areas pre-calculated for EPSG:3857
+        # used for vector tile creation
+        GeometrySource = self.classes['geometry_source']
+        TableInfo = self.classes['table_info']
+        geometry_source = self.session.query(GeometrySource).filter(GeometrySource.id == geometry_source_id).one()
+        table_info = self.session.query(TableInfo).filter(TableInfo.id == geometry_source.table_info_id).one()
+        new_column = "sqrt_area_%s" % (column.name)
+
+        self.session.execute("ALTER TABLE %s.%s ADD COLUMN %s numeric" % (self._schema_name, table_info.name, new_column))
+        self.session.commit()
+
+        cls = self.get_table_class(table_info.name)
+        tbl = cls.__table__
+
+        self.session.execute(
+            sqlalchemy.update(
+                tbl, values={
+                    new_column:
+                    sqlalchemy.func.sqrt(sqlalchemy.func.st_area(column))
+                }))
+        self.session.commit()
+
+        self.session.execute("CREATE INDEX %s ON %s.%s USING btree ( %s )" % (
+            "%s_%s_btree" % (
+                table_info.name,
+                new_column),
+            self._schema_name,
+            table_info.name,
+            new_column))
+        self.session.commit()
+
     def register_table(self, table_name, geom=False, srid=None, gid=None):
         table_info_id, = self.session.execute(
             self.tables['table_info'].insert().values(
@@ -656,6 +688,11 @@ class DataLoader(DataAccess):
                 to_generate.remove(srid)
             for gen_srid in to_generate:
                 self.reproject(source_id, column.name, gen_srid)
+
+            # add pre-calculated area column for use by vector tile output
+            if geomtype == "POLYGON" or geomtype == "MULTIPOLYGON":
+                column = self.find_geom_column(table_name, 3857)
+                self.add_mvt_area_column(source_id, column)
         self.session.commit()
         return self.get_table_info(table_name)
 
