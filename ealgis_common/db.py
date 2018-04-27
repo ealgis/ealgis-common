@@ -232,6 +232,7 @@ class SchemaAccess(DataAccess):
         #
         _, tables = store.load_schema(schema_name)
         self.tables = dict((t.name, t) for t in tables)
+        self.table_cache = {}
         self.class_names_used = Counter()
         self.classes = dict((t.name, self.get_table_class(t.name)) for t in tables)
 
@@ -258,23 +259,24 @@ class SchemaAccess(DataAccess):
         inspector = inspect(self.engine)
         return inspector.get_table_names(schema=self._schema_name)
 
-    def get_table_class(self, table_name):
+    def get_table_class(self, table_name, refresh=False):
         """
         table definitions may change over time (as the result of the addition of columns, ...)
         hence we do not cache the reflected class instances this function creates
         """
-        self.class_names_used[table_name] += 1
-        count = self.class_names_used[table_name]
-        nm = "Table_{}.{}".format(self._schema_name, table_name)
-        if count > 1:
-            nm = '{}_{}'.format(nm, count)
-        tc = type(nm, (Base,), {'__table__': self.get_table(table_name)})
-        return tc
+        if refresh or table_name not in self.table_cache:
+            self.class_names_used[table_name] += 1
+            count = self.class_names_used[table_name]
+            nm = "Table_{}.{}".format(self._schema_name, table_name)
+            if count > 1:
+                nm = '{}_{}'.format(nm, count)
+            self.table_cache[table_name] = type(nm, (Base,), {'__table__': self.get_table(table_name)})
+        return self.table_cache[table_name]
 
-    def get_table_class_by_id(self, table_id):
+    def get_table_class_by_id(self, table_id, **kwargs):
         try:
             table_info = self.get_table_info_by_id(table_id)
-            return self.get_table_class(table_info.name)
+            return self.get_table_class(table_info.name, **kwargs)
         except sqlalchemy.orm.exc.NoResultFound:
             raise Exception("could not retrieve table class for table `{}'".format(table_id))
 
@@ -605,7 +607,7 @@ class DataLoader(SchemaAccess):
         self.session.commit()
         # committed, so we can introspect it, and then transform original
         # geometry data to this SRID
-        cls = self.get_table_class(table_info.name)
+        cls = self.get_table_class(table_info.name, refresh=True)
         tbl = cls.__table__
         self.session.execute(
             sqlalchemy.update(
@@ -644,7 +646,7 @@ class DataLoader(SchemaAccess):
         self.session.execute("ALTER TABLE %s.%s ADD COLUMN %s numeric" % (self._schema_name, table_info.name, new_column))
         self.session.commit()
 
-        cls = self.get_table_class(table_info.name)
+        cls = self.get_table_class(table_info.name, refresh=True)
         tbl = cls.__table__
 
         self.session.execute(
