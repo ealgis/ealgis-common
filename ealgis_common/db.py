@@ -118,25 +118,25 @@ class SchemaInformation():
     @lru_cache(maxsize=None)
     def get_geometry_schemas(self):
         def is_geometry_schema(schema_name):
-            db = broker.access_schema(schema_name)
-            GeometrySource = db.get_table_class("geometry_source")
-            # The schema must have at least some rows in geometry_sources
-            if db.session.query(GeometrySource).first() is not None:
-                return True
-            return False
+            with broker.access_schema(schema_name) as db:
+                GeometrySource = db.get_table_class("geometry_source")
+                # The schema must have at least some rows in geometry_sources
+                if db.session.query(GeometrySource).first() is not None:
+                    return True
+                return False
 
         return [t for t in self.compliant if is_geometry_schema(t)]
 
     @lru_cache(maxsize=None)
     def get_ealgis_schemas(self):
         def is_data_schema(schema_name):
-            db = broker.access_schema(schema_name)
-            ColumnInfo = db.get_table_class("column_info")
-            # The schema must have at least some rows in column_info
-            # If not, it's probably just a geometry/shapes schema
-            if db.session.query(ColumnInfo).first() is not None:
-                return True
-            return False
+            with broker.access_schema(schema_name) as db:
+                ColumnInfo = db.get_table_class("column_info")
+                # The schema must have at least some rows in column_info
+                # If not, it's probably just a geometry/shapes schema
+                if db.session.query(ColumnInfo).first() is not None:
+                    return True
+                return False
 
         return [t for t in self.compliant if is_data_schema(t)]
 
