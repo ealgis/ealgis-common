@@ -552,7 +552,6 @@ class DataLoaderFactory:
         self.engine.execute(CreateSchema(schema_name))
 
     def _create_extensions(self, connection_string):
-        logger.debug(['connection string', connection_string])
         extensions = ('postgis', 'postgis_topology')
         for extension in extensions:
             try:
