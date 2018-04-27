@@ -164,7 +164,7 @@ class DataAccess(EngineInfo):
         self.session.close()
 
     def access_schema(self, schema_name):
-        return SchemaAccess(schema_name)
+        return SchemaAccess(schema_name, engine=self.engine)
 
     def get_summary_stats_for_layer(self, layer):
         SQL_TEMPLATE = """
