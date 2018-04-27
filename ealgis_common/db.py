@@ -19,101 +19,15 @@ Base = declarative_base()
 logger = make_logger(__name__)
 
 
-class DataAccessBroker:
+class AccessBroker:
+    """
+    a global singleton: we want to have a single SQLalchemy engine, so we're
+    not continually opening connections to the database
+    """
+
     def __init__(self):
         self.providers = {}
-
-    def Provide(self, schema_name):
-        if schema_name in self.providers:
-            return self.providers[schema_name]
-        self.providers[schema_name] = DataAccess(DataAccess.make_engine(), schema_name)
-        return self.providers[schema_name]
-
-    def cleanup(self):
-        for schema_name, provider in self.providers.items():
-            provider.cleanup()
-
-
-broker = DataAccessBroker()
-
-
-def exit_handler():
-    broker.cleanup()
-
-
-atexit.register(exit_handler)
-
-
-class SchemaInformation():
-    # PostgreSQL and PostGIS system schemas
-    system_schemas = ["information_schema", "tiger", "tiger_data", "topology", "public"]
-
-    def __init__(self, engine):
-        self.inspector = inspect(engine)
-        self.compliant = [
-            t for t in self.inspector.get_schema_names() if
-            t not in self.system_schemas and self._has_required_ealgis_tables(t)]
-
-    @classmethod
-    def _is_system_schema(cls, schema_name):
-        return schema_name in cls.system_schemas
-
-    def _has_required_ealgis_tables(self, schema_name):
-        required_tables = ["ealgis_metadata", "table_info", "column_info", "geometry_linkage", "geometry_source", "geometry_source_projection"]
-        table_names = self.inspector.get_table_names(schema=schema_name)
-        return set(required_tables).issubset(table_names)
-
-    @lru_cache(maxsize=None)
-    def get_geometry_schemas(self):
-        def is_geometry_schema(schema_name):
-            db = broker.Provide(schema_name)
-            GeometrySource = db.get_table_class("geometry_source")
-            # The schema must have at least some rows in geometry_sources
-            if db.session.query(GeometrySource).first() is not None:
-                return True
-            return False
-
-        return [t for t in self.comploiant if is_geometry_schema(t)]
-
-    @lru_cache(maxsize=None)
-    def get_ealgis_schemas(self):
-        def is_data_schema(schema_name):
-            db = broker.Provide(schema_name)
-            ColumnInfo = db.get_table_class("column_info")
-            # The schema must have at least some rows in column_info
-            # If not, it's probably just a geometry/shapes schema
-            if db.session.query(ColumnInfo).first() is not None:
-                return True
-            return False
-
-        return [t for t in self.compliant if is_data_schema(t)]
-
-
-class DataAccess():
-    def __init__(self, engine, schema_name):
-        self.engine = engine
-        Session = sessionmaker()
-        Session.configure(bind=self.engine)
-        self.session = Session()
-        self._schema_name = schema_name
-        #
-        self.classes = {}
-        self.class_version = Counter()
-        #
-        _, tables = store.load_schema(schema_name)
-        self.tables = dict((t.name, t) for t in tables)
-        self.class_names_used = Counter()
-        self.classes = dict((t.name, self.get_table_class(t.name)) for t in tables)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, type, value, traceback):
-        self.cleanup()
-
-    def cleanup(self):
-        self.session.close()
-        del self.engine
+        self.engine = self.make_engine()
 
     @classmethod
     def make_engine(cls, **kwargs):
@@ -127,6 +41,18 @@ class DataAccess():
         db_user = db_user or ge('DATASTORE_USERNAME') or ge('DB_USERNAME')
         db_password = db_password or ge('DATASTORE_PASSWORD') or ge('DB_PASSWORD')
         return 'postgres://{}:{}@{}:5432/{}'.format(db_user, db_password, db_host, db_name)
+
+    def schema_information(self):
+        return SchemaInformation()
+
+    def access_data(self):
+        return DataAccess()
+
+    def access_schema(self, schema_name):
+        if schema_name in self.providers:
+            return self.providers[schema_name]
+        self.providers[schema_name] = SchemaAccess(schema_name)
+        return self.providers[schema_name]
 
     def engineurl(self):
         return self.engine.engine.url
@@ -149,8 +75,162 @@ class DataAccess():
     def dbpassword(self):
         return self.engine.engine.url.password
 
+    def cleanup(self):
+        for schema_name, provider in self.providers.items():
+            provider.cleanup()
+
+
+broker = AccessBroker()
+
+
+def exit_handler():
+    broker.cleanup()
+
+
+atexit.register(exit_handler)
+
+
+class SchemaInformation():
+    """
+    provide information about EAlGIS data schemas within the datastore
+    """
+
+    # PostgreSQL and PostGIS system schemas
+    system_schemas = ["information_schema", "tiger", "tiger_data", "topology", "public"]
+
+    def __init__(self):
+        self.inspector = inspect(broker.engine)
+        self.compliant = [
+            t for t in self.inspector.get_schema_names() if
+            t not in self.system_schemas and self._has_required_ealgis_tables(t)]
+
+    @classmethod
+    def _is_system_schema(cls, schema_name):
+        return schema_name in cls.system_schemas
+
+    def _has_required_ealgis_tables(self, schema_name):
+        required_tables = ["ealgis_metadata", "table_info", "column_info", "geometry_linkage", "geometry_source", "geometry_source_projection"]
+        table_names = self.inspector.get_table_names(schema=schema_name)
+        return set(required_tables).issubset(table_names)
+
+    @lru_cache(maxsize=None)
+    def get_geometry_schemas(self):
+        def is_geometry_schema(schema_name):
+            db = broker.access_schema(schema_name)
+            GeometrySource = db.get_table_class("geometry_source")
+            # The schema must have at least some rows in geometry_sources
+            if db.session.query(GeometrySource).first() is not None:
+                return True
+            return False
+
+        return [t for t in self.compliant if is_geometry_schema(t)]
+
+    @lru_cache(maxsize=None)
+    def get_ealgis_schemas(self):
+        def is_data_schema(schema_name):
+            db = broker.access_schema(schema_name)
+            ColumnInfo = db.get_table_class("column_info")
+            # The schema must have at least some rows in column_info
+            # If not, it's probably just a geometry/shapes schema
+            if db.session.query(ColumnInfo).first() is not None:
+                return True
+            return False
+
+        return [t for t in self.compliant if is_data_schema(t)]
+
+
+class DataAccess():
+    """
+    Access the datastore.
+    None of the methods on this class are bound to schemas.
+    To access a schema, see the subclass SchemaAccess
+    """
+
+    def __init__(self):
+        Session = sessionmaker()
+        Session.configure(bind=broker.engine)
+        self.session = Session()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, type, value, traceback):
+        self.cleanup()
+
+    def cleanup(self):
+        self.session.close()
+
     def access_schema(self, schema_name):
-        return DataAccess(self.engine, schema_name)
+        return SchemaAccess(schema_name)
+
+    def get_summary_stats_for_layer(self, layer):
+        SQL_TEMPLATE = """
+            SELECT
+                MIN(sq.q),
+                MAX(sq.q),
+                STDDEV(sq.q)
+            FROM ({query}) AS sq"""
+
+        (min, max, stddev) = self.session.execute(SQL_TEMPLATE.format(query=layer["_postgis_query"])).first()
+
+        return {
+            "min": min,
+            "max": max,
+            "stddev": stddev if stddev is not None else 0,
+        }
+
+    def get_bbox_for_layer(self, layer):
+        SQL_TEMPLATE = """
+            SELECT
+                ST_XMin(latlon_bbox) AS minx,
+                ST_XMax(latlon_bbox) AS maxx,
+                ST_YMin(latlon_bbox) AS miny,
+                ST_YMax(latlon_bbox) as maxy
+            FROM (
+                SELECT
+                    -- Eugh
+                    Box2D(ST_GeomFromText(ST_AsText(ST_Transform(ST_SetSRID(ST_Extent(geom_3857), 3857), 4326)))) AS latlon_bbox
+                FROM (
+                    {query}
+                ) AS exp
+            ) AS bbox;
+        """
+
+        return dict(self.session.execute(SQL_TEMPLATE.format(query=layer["_postgis_query"])).first())
+
+    def get_summary_stats_for_column(self, column, table):
+        SQL_TEMPLATE = """
+            SELECT
+                MIN(sq.q),
+                MAX(sq.q),
+                STDDEV(sq.q)
+            FROM (SELECT {col_name} AS q FROM {schema_name}.{table_name}) AS sq"""
+
+        (min, max, stddev) = self.session.execute(SQL_TEMPLATE.format(col_name=column.name, schema_name=self._schema_name, table_name=table.name)).first()
+
+        return {
+            "min": min,
+            "max": max,
+            "stddev": stddev,
+        }
+
+
+class SchemaAccess(DataAccess):
+    """
+    access a data schema within the datastore
+    """
+
+    def __init__(self, schema_name):
+        super().__init__()
+        self._schema_name = schema_name
+        #
+        self.classes = {}
+        self.class_version = Counter()
+        #
+        _, tables = store.load_schema(schema_name)
+        self.tables = dict((t.name, t) for t in tables)
+        self.class_names_used = Counter()
+        self.classes = dict((t.name, self.get_table_class(t.name)) for t in tables)
 
     '''
     Database Table Accessors
@@ -164,12 +244,12 @@ class DataAccess():
             return False
 
     def get_table(self, table_name):
-        return sqlalchemy.Table(table_name, sqlalchemy.MetaData(), schema=self._schema_name, autoload=True, autoload_with=self.engine.engine)
+        return sqlalchemy.Table(table_name, sqlalchemy.MetaData(), schema=self._schema_name, autoload=True, autoload_with=broker.engine)
 
     def get_table_names(self):
         "this is a more lightweight approach to getting table names from the db that avoids all of that messy reflection"
         "c.f. http://docs.sqlalchemy.org/en/rel_0_9/core/reflection.html?highlight=inspector#fine-grained-reflection-with-inspector"
-        inspector = inspect(self.engine.engine)
+        inspector = inspect(broker.engine)
         return inspector.get_table_names(schema=self._schema_name)
 
     def get_table_class(self, table_name):
@@ -410,22 +490,6 @@ class DataAccess():
         except sqlalchemy.orm.exc.NoResultFound:
             raise Exception("could not find any columns for table '{}'".format(tableinfo_id))
 
-    def get_summary_stats_for_column(self, column, table):
-        SQL_TEMPLATE = """
-            SELECT
-                MIN(sq.q),
-                MAX(sq.q),
-                STDDEV(sq.q)
-            FROM (SELECT {col_name} AS q FROM {schema_name}.{table_name}) AS sq"""
-
-        (min, max, stddev) = self.session.execute(SQL_TEMPLATE.format(col_name=column.name, schema_name=self._schema_name, table_name=table.name)).first()
-
-        return {
-            "min": min,
-            "max": max,
-            "stddev": stddev,
-        }
-
     '''
     Data Attribute Accessors
     '''
@@ -449,41 +513,6 @@ class DataAccess():
         except sqlalchemy.orm.exc.NoResultFound:
             raise Exception("could not retrieve ealgis_metadata table")
 
-    def get_summary_stats_for_layer(self, layer):
-        SQL_TEMPLATE = """
-            SELECT
-                MIN(sq.q),
-                MAX(sq.q),
-                STDDEV(sq.q)
-            FROM ({query}) AS sq"""
-
-        (min, max, stddev) = self.session.execute(SQL_TEMPLATE.format(query=layer["_postgis_query"])).first()
-
-        return {
-            "min": min,
-            "max": max,
-            "stddev": stddev if stddev is not None else 0,
-        }
-
-    def get_bbox_for_layer(self, layer):
-        SQL_TEMPLATE = """
-            SELECT
-                ST_XMin(latlon_bbox) AS minx,
-                ST_XMax(latlon_bbox) AS maxx,
-                ST_YMin(latlon_bbox) AS miny,
-                ST_YMax(latlon_bbox) as maxy
-            FROM (
-                SELECT
-                    -- Eugh
-                    Box2D(ST_GeomFromText(ST_AsText(ST_Transform(ST_SetSRID(ST_Extent(geom_3857), 3857), 4326)))) AS latlon_bbox
-                FROM (
-                    {query}
-                ) AS exp
-            ) AS bbox;
-        """
-
-        return dict(self.session.execute(SQL_TEMPLATE.format(query=layer["_postgis_query"])).first())
-
 
 class DataLoaderFactory:
     def __init__(self, clean=True, **kwargs):
@@ -493,8 +522,8 @@ class DataLoaderFactory:
         if self._create_database(connection_string, clean):
             self._create_extensions(connection_string)
 
-    def make_data_access(self, schema_name):
-        return DataAccess(self._engine, schema_name)
+    def make_schema_access(self, schema_name):
+        return SchemaAccess(schema_name)
 
     def make_loader(self, schema_name, **loader_kwargs):
         self._create_schema(schema_name)
@@ -693,7 +722,7 @@ class DataLoader(DataAccess):
         self.session.commit()
 
     def add_dependency(self, required_schema):
-        dep_access = DataAccess(self.engine, required_schema)
+        dep_access = DataAccess(broker.engine, required_schema)
         metadata_cls = dep_access.get_table_class('ealgis_metadata')
         metadata = self.session.query(metadata_cls).one()
         Dependencies = self.classes['dependencies']
@@ -708,7 +737,7 @@ class DataLoader(DataAccess):
         self.session.commit()
 
     def result(self):
-        return DataLoaderResult(self._schema_name, self.engineurl(), self.dbpassword())
+        return DataLoaderResult(self._schema_name, broker.engineurl(), self.dbpassword())
 
 
 class DataLoaderResult:

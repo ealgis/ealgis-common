@@ -8,6 +8,7 @@ import glob
 import re
 from shutil import rmtree
 from .util import piperun, table_name_valid, make_logger
+from ealgis_common.db import broker
 
 from .seqclassifier import SequenceClassifier
 import csv
@@ -136,13 +137,13 @@ class ShapeLoader(GeoDataLoader):
 
     def load(self, eal):
         shp_cmd = ['shp2pgsql', '-s', str(self.srid), '-t', '2D', '-I', self.shppath, self.schema_name + '.' + self.table_name]
-        os.environ['PGPASSWORD'] = eal.dbpassword()
+        os.environ['PGPASSWORD'] = broker.dbpassword()
         _, _, code = piperun(shp_cmd, [
             'psql',
-            '-h', eal.dbhost(),
-            '-U', eal.dbuser(),
-            '-p', str(eal.dbport()),
-            '-q', eal.dbname()])
+            '-h', broker.dbhost(),
+            '-U', broker.dbuser(),
+            '-p', str(broker.dbport()),
+            '-q', broker.dbname()])
         if code != 0:
             raise LoaderException("load of %s failed." % self.shpname)
         # make the meta info
@@ -157,7 +158,7 @@ class MapInfoLoader(GeoDataLoader):
     def __init__(self, schema_name, mipath, table_name=None):
         self.schema_name = schema_name
         self.filename = MapInfoLoader.get_filename(mipath)
-        self.table_name = table_name or GeoDataLoader.generate_table_name(MapInfoLoader.get_file_base(filename))
+        self.table_name = table_name or GeoDataLoader.generate_table_name(self.get_file_base(self.filename))
         if not table_name_valid(self.table_name):
             raise LoaderException("table name is `%s' is invalid." % self.table_name)
 
@@ -186,11 +187,11 @@ class MapInfoLoader(GeoDataLoader):
             'ogr2ogr',
             '-f', 'postgresql',
             'PG:dbname=\'{}\' host=\'{}\' port=\'{}\' user=\'{}\' password=\'{}\''.format(
-                eal.dbname(),
-                eal.dbhost(),
-                eal.dbport(),
-                eal.dbuser(),
-                eal.dbpassword()),
+                broker.dbname(),
+                broker.dbhost(),
+                broker.dbport(),
+                broker.dbuser(),
+                broker.dbpassword()),
             self.filename,
             '-nln', self.table_name,
             '-lco', 'fid=gid',
@@ -221,11 +222,11 @@ class KMLLoader(GeoDataLoader):
             'ogr2ogr',
             '-f', 'postgresql',
             'PG:dbname=\'{}\' host=\'{}\' port=\'{}\' user=\'{}\' password=\'{}\''.format(
-                eal.dbname(),
-                eal.dbhost(),
-                eal.dbport(),
-                eal.dbuser(),
-                eal.dbpassword()),
+                broker.dbname(),
+                broker.dbhost(),
+                broker.dbport(),
+                broker.dbuser(),
+                broker.dbpassword()),
             self.filename,
             '-nln', self.table_name,
             '-append',
