@@ -49,7 +49,7 @@ class AccessBroker(EngineInfo):
 
     def __init__(self):
         self.providers = {}
-        # self.engine = self.make_engine()
+        self.engine = self.make_engine()
 
     @classmethod
     def make_engine(cls, **kwargs):
@@ -357,6 +357,8 @@ class SchemaAccess(DataAccess):
 
         if len(geom_columns) > 1:
             raise Exception("more than one geometry column for srid '{srid}'?".format(srid=srid))
+        elif len(geom_columns) == 0:
+            raise Exception("no geometry columns for srid '{srid}'?".format(srid=srid))
         return geom_columns[0]
 
     '''
@@ -524,9 +526,9 @@ class DataLoaderFactory:
     def __init__(self, clean=True, **kwargs):
         # create database and connect
         connection_string = AccessBroker.make_connection_string(**kwargs)
+        self.engine = create_engine(connection_string)
         if self._create_database(connection_string, clean):
             self._create_extensions(connection_string)
-        self.engine = create_engine(connection_string)
 
     def make_schema_access(self, schema_name):
         return SchemaAccess(schema_name)
@@ -550,6 +552,7 @@ class DataLoaderFactory:
         self.engine.execute(CreateSchema(schema_name))
 
     def _create_extensions(self, connection_string):
+        logger.debug(['connection string', connection_string])
         extensions = ('postgis', 'postgis_topology')
         for extension in extensions:
             try:
@@ -567,7 +570,6 @@ class DataLoader(SchemaAccess):
         metadata, tables = store.load_schema(schema_name)
         metadata.create_all(engine)
         super().__init__(schema_name, engine=self.engine)
-        print(self.session)
 
     def set_table_metadata(self, table_name, meta_dict):
         ti = self.get_table_info(table_name)
@@ -586,16 +588,6 @@ class DataLoader(SchemaAccess):
 
     def register_column(self, table_name, column_name, meta_dict):
         self.register_columns(table_name, [column_name, meta_dict])
-
-    def repair_geometry(self, geometry_source):
-        # FIXME: clean this up, make generic: or delete, and move into loaders?
-        logger.debug("running geometry QC and repair: %s" % (geometry_source.table_info.name))
-        cls = self.get_table_class(geometry_source.table_info.name)
-        geom_attr = getattr(cls, geometry_source.column)
-        self.session.execute(sqlalchemy.update(
-            cls.__table__, values={
-                geom_attr: sqlalchemy.func.st_multi(sqlalchemy.func.st_buffer(geom_attr, 0))
-            }).where(sqlalchemy.func.st_isvalid(geom_attr) == False))  # noqa
 
     def reproject(self, geometry_source_id, from_column, to_srid):
         # add the geometry column
