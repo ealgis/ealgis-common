@@ -65,15 +65,15 @@ class AccessBroker(EngineInfo):
         return 'postgres://{}:{}@{}:5432/{}'.format(db_user, db_password, db_host, db_name)
 
     def schema_information(self):
-        return SchemaInformation()
+        return SchemaInformation(engine=self.engine)
 
     def access_data(self):
-        return DataAccess()
+        return DataAccess(engine=self.engine)
 
     def access_schema(self, schema_name):
         if schema_name in self.providers:
             return self.providers[schema_name]
-        self.providers[schema_name] = SchemaAccess(schema_name)
+        self.providers[schema_name] = SchemaAccess(schema_name, engine=self.engine)
         return self.providers[schema_name]
 
     def cleanup(self):
@@ -531,7 +531,7 @@ class DataLoaderFactory:
             self._create_extensions(connection_string)
 
     def make_schema_access(self, schema_name):
-        return SchemaAccess(schema_name)
+        return SchemaAccess(schema_name, engine=self.engine)
 
     def make_loader(self, schema_name, **loader_kwargs):
         self._create_schema(schema_name)
@@ -721,7 +721,7 @@ class DataLoader(SchemaAccess):
         self.session.commit()
 
     def add_dependency(self, required_schema):
-        dep_access = DataAccess(self.engine, required_schema)
+        dep_access = SchemaAccess(required_schema, engine=self.engine)
         metadata_cls = dep_access.get_table_class('ealgis_metadata')
         metadata = self.session.query(metadata_cls).one()
         Dependencies = self.classes['dependencies']
