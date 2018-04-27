@@ -19,7 +19,29 @@ Base = declarative_base()
 logger = make_logger(__name__)
 
 
-class AccessBroker:
+class EngineInfo():
+    """
+    mix-in providing convenience methods to grab
+    connection params
+    """
+
+    def dbname(self):
+        return self.engine.engine.url.database
+
+    def dbhost(self):
+        return self.engine.engine.url.host
+
+    def dbuser(self):
+        return self.engine.engine.url.username
+
+    def dbport(self):
+        return self.engine.engine.url.port
+
+    def dbpassword(self):
+        return self.engine.engine.url.password
+
+
+class AccessBroker(EngineInfo):
     """
     a global singleton: we want to have a single SQLalchemy engine, so we're
     not continually opening connections to the database
@@ -27,7 +49,7 @@ class AccessBroker:
 
     def __init__(self):
         self.providers = {}
-        self.engine = self.make_engine()
+        # self.engine = self.make_engine()
 
     @classmethod
     def make_engine(cls, **kwargs):
@@ -54,27 +76,6 @@ class AccessBroker:
         self.providers[schema_name] = SchemaAccess(schema_name)
         return self.providers[schema_name]
 
-    def engineurl(self):
-        return self.engine.engine.url
-
-    def dbname(self):
-        return self.engine.engine.url.database
-
-    def dbhost(self):
-        return self.engine.engine.url.host
-
-    def dbuser(self):
-        return self.engine.engine.url.username
-
-    def dbport(self):
-        return self.engine.engine.url.port
-
-    def dbschema(self):
-        return self._schema_name
-
-    def dbpassword(self):
-        return self.engine.engine.url.password
-
     def cleanup(self):
         for schema_name, provider in self.providers.items():
             provider.cleanup()
@@ -98,8 +99,9 @@ class SchemaInformation():
     # PostgreSQL and PostGIS system schemas
     system_schemas = ["information_schema", "tiger", "tiger_data", "topology", "public"]
 
-    def __init__(self):
-        self.inspector = inspect(broker.engine)
+    def __init__(self, engine=None):
+        self.engine = engine or broker.engine
+        self.inspector = inspect(self.engine)
         self.compliant = [
             t for t in self.inspector.get_schema_names() if
             t not in self.system_schemas and self._has_required_ealgis_tables(t)]
@@ -139,16 +141,17 @@ class SchemaInformation():
         return [t for t in self.compliant if is_data_schema(t)]
 
 
-class DataAccess():
+class DataAccess(EngineInfo):
     """
     Access the datastore.
     None of the methods on this class are bound to schemas.
     To access a schema, see the subclass SchemaAccess
     """
 
-    def __init__(self):
+    def __init__(self, engine=None):
         Session = sessionmaker()
-        Session.configure(bind=broker.engine)
+        self.engine = engine or broker.engine
+        Session.configure(bind=self.engine)
         self.session = Session()
 
     def __enter__(self):
@@ -220,8 +223,8 @@ class SchemaAccess(DataAccess):
     access a data schema within the datastore
     """
 
-    def __init__(self, schema_name):
-        super().__init__()
+    def __init__(self, schema_name, engine=None):
+        super().__init__(engine=engine)
         self._schema_name = schema_name
         #
         self.classes = {}
@@ -231,6 +234,9 @@ class SchemaAccess(DataAccess):
         self.tables = dict((t.name, t) for t in tables)
         self.class_names_used = Counter()
         self.classes = dict((t.name, self.get_table_class(t.name)) for t in tables)
+
+    def dbschema(self):
+        return self._schema_name
 
     '''
     Database Table Accessors
@@ -244,12 +250,12 @@ class SchemaAccess(DataAccess):
             return False
 
     def get_table(self, table_name):
-        return sqlalchemy.Table(table_name, sqlalchemy.MetaData(), schema=self._schema_name, autoload=True, autoload_with=broker.engine)
+        return sqlalchemy.Table(table_name, sqlalchemy.MetaData(), schema=self._schema_name, autoload=True, autoload_with=self.engine)
 
     def get_table_names(self):
         "this is a more lightweight approach to getting table names from the db that avoids all of that messy reflection"
         "c.f. http://docs.sqlalchemy.org/en/rel_0_9/core/reflection.html?highlight=inspector#fine-grained-reflection-with-inspector"
-        inspector = inspect(broker.engine)
+        inspector = inspect(self.engine)
         return inspector.get_table_names(schema=self._schema_name)
 
     def get_table_class(self, table_name):
@@ -517,17 +523,17 @@ class SchemaAccess(DataAccess):
 class DataLoaderFactory:
     def __init__(self, clean=True, **kwargs):
         # create database and connect
-        connection_string = DataAccess.make_connection_string(**kwargs)
-        self._engine = create_engine(connection_string)
+        connection_string = AccessBroker.make_connection_string(**kwargs)
         if self._create_database(connection_string, clean):
             self._create_extensions(connection_string)
+        self.engine = create_engine(connection_string)
 
     def make_schema_access(self, schema_name):
         return SchemaAccess(schema_name)
 
     def make_loader(self, schema_name, **loader_kwargs):
         self._create_schema(schema_name)
-        return DataLoader(self._engine, schema_name, **loader_kwargs)
+        return DataLoader(self.engine, schema_name, **loader_kwargs)
 
     def _create_database(self, connection_string, clean):
         # Initialise the database
@@ -541,25 +547,27 @@ class DataLoaderFactory:
 
     def _create_schema(self, schema_name):
         logger.info("create schema: %s" % schema_name)
-        self._engine.execute(CreateSchema(schema_name))
+        self.engine.execute(CreateSchema(schema_name))
 
     def _create_extensions(self, connection_string):
         extensions = ('postgis', 'postgis_topology')
         for extension in extensions:
             try:
                 logger.info("creating extension: %s" % extension)
-                self._engine.execute('CREATE EXTENSION %s;' % extension)
+                self.engine.execute('CREATE EXTENSION %s;' % extension)
             except sqlalchemy.exc.ProgrammingError as e:
                 if 'already exists' not in str(e):
                     print("couldn't load: %s (%s)" % (extension, e))
 
 
-class DataLoader(DataAccess):
+class DataLoader(SchemaAccess):
     def __init__(self, engine, schema_name, mandatory_srids=None):
+        self.engine = engine
         self._mandatory_srids = mandatory_srids
         metadata, tables = store.load_schema(schema_name)
         metadata.create_all(engine)
-        super(DataLoader, self).__init__(engine, schema_name)
+        super().__init__(schema_name, engine=self.engine)
+        print(self.session)
 
     def set_table_metadata(self, table_name, meta_dict):
         ti = self.get_table_info(table_name)
@@ -722,7 +730,7 @@ class DataLoader(DataAccess):
         self.session.commit()
 
     def add_dependency(self, required_schema):
-        dep_access = DataAccess(broker.engine, required_schema)
+        dep_access = DataAccess(self.engine, required_schema)
         metadata_cls = dep_access.get_table_class('ealgis_metadata')
         metadata = self.session.query(metadata_cls).one()
         Dependencies = self.classes['dependencies']
@@ -737,7 +745,10 @@ class DataLoader(DataAccess):
         self.session.commit()
 
     def result(self):
-        return DataLoaderResult(self._schema_name, broker.engineurl(), self.dbpassword())
+        return DataLoaderResult(
+            self._schema_name,
+            self.engine.engine.url,
+            self.engine.engine.url.password)
 
 
 class DataLoaderResult:

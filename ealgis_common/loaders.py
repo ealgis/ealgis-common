@@ -8,7 +8,6 @@ import glob
 import re
 from shutil import rmtree
 from .util import piperun, table_name_valid, make_logger
-from ealgis_common.db import broker
 
 from .seqclassifier import SequenceClassifier
 import csv
@@ -137,13 +136,13 @@ class ShapeLoader(GeoDataLoader):
 
     def load(self, eal):
         shp_cmd = ['shp2pgsql', '-s', str(self.srid), '-t', '2D', '-I', self.shppath, self.schema_name + '.' + self.table_name]
-        os.environ['PGPASSWORD'] = broker.dbpassword()
+        os.environ['PGPASSWORD'] = eal.dbpassword()
         _, _, code = piperun(shp_cmd, [
             'psql',
-            '-h', broker.dbhost(),
-            '-U', broker.dbuser(),
-            '-p', str(broker.dbport()),
-            '-q', broker.dbname()])
+            '-h', eal.dbhost(),
+            '-U', eal.dbuser(),
+            '-p', str(eal.dbport()),
+            '-q', eal.dbname()])
         if code != 0:
             raise LoaderException("load of %s failed." % self.shpname)
         # make the meta info
@@ -187,11 +186,11 @@ class MapInfoLoader(GeoDataLoader):
             'ogr2ogr',
             '-f', 'postgresql',
             'PG:dbname=\'{}\' host=\'{}\' port=\'{}\' user=\'{}\' password=\'{}\''.format(
-                broker.dbname(),
-                broker.dbhost(),
-                broker.dbport(),
-                broker.dbuser(),
-                broker.dbpassword()),
+                eal.dbname(),
+                eal.dbhost(),
+                eal.dbport(),
+                eal.dbuser(),
+                eal.dbpassword()),
             self.filename,
             '-nln', self.table_name,
             '-lco', 'fid=gid',
@@ -222,11 +221,11 @@ class KMLLoader(GeoDataLoader):
             'ogr2ogr',
             '-f', 'postgresql',
             'PG:dbname=\'{}\' host=\'{}\' port=\'{}\' user=\'{}\' password=\'{}\''.format(
-                broker.dbname(),
-                broker.dbhost(),
-                broker.dbport(),
-                broker.dbuser(),
-                broker.dbpassword()),
+                eal.dbname(),
+                eal.dbhost(),
+                eal.dbport(),
+                eal.dbuser(),
+                eal.dbpassword()),
             self.filename,
             '-nln', self.table_name,
             '-append',
