@@ -19,73 +19,11 @@ Base = declarative_base()
 logger = make_logger(__name__)
 
 
-class DataAccessBroker:
-    def __init__(self):
-        self.providers = {}
-
-    def Provide(self, schema_name):
-        if schema_name in self.providers:
-            return self.providers[schema_name]
-        self.providers[schema_name] = DataAccess(DataAccess.make_engine(), schema_name)
-        return self.providers[schema_name]
-
-    def cleanup(self):
-        for schema_name, provider in self.providers.items():
-            provider.cleanup()
-
-
-broker = DataAccessBroker()
-
-
-def exit_handler():
-    broker.cleanup()
-
-
-atexit.register(exit_handler)
-
-
-class DataAccess():
-    def __init__(self, engine, schema_name):
-        self.engine = engine
-        Session = sessionmaker()
-        Session.configure(bind=self.engine)
-        self.session = Session()
-        self._schema_name = schema_name
-        #
-        self.inspector = inspect(self.engine)
-        self.schemas = self.inspector.get_schema_names()
-        #
-        self.classes = {}
-        self.class_version = Counter()
-        #
-        _, tables = store.load_schema(schema_name)
-        self.tables = dict((t.name, t) for t in tables)
-        self.class_names_used = Counter()
-        self.classes = dict((t.name, self.get_table_class(t.name)) for t in tables)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, type, value, traceback):
-        self.cleanup()
-
-    def cleanup(self):
-        self.session.close()
-        del self.engine
-
-    @classmethod
-    def make_engine(cls, db_name=os.environ.get("DB_NAME")):
-        return create_engine(cls.make_connection_string(db_name))
-
-    @classmethod
-    def make_connection_string(cls, db_name):
-        dbuser = os.environ.get('DB_USERNAME')
-        dbpassword = os.environ.get('DB_PASSWORD')
-        dbhost = os.environ.get('DB_HOST')
-        return 'postgres://%s:%s@%s:5432/%s' % (dbuser, dbpassword, dbhost, db_name)
-
-    def engineurl(self):
-        return self.engine.engine.url
+class EngineInfo():
+    """
+    mix-in providing convenience methods to grab
+    connection params
+    """
 
     def dbname(self):
         return self.engine.engine.url.database
@@ -99,74 +37,207 @@ class DataAccess():
     def dbport(self):
         return self.engine.engine.url.port
 
-    def dbschema(self):
-        return self._schema_name
-
     def dbpassword(self):
         return self.engine.engine.url.password
 
+
+class AccessBroker(EngineInfo):
+    """
+    a global singleton: we want to have a single SQLalchemy engine, so we're
+    not continually opening connections to the database
+    """
+
+    def __init__(self):
+        self.providers = {}
+        self.engine = self.make_engine()
+
+    @classmethod
+    def make_engine(cls, **kwargs):
+        return create_engine(cls.make_connection_string(**kwargs))
+
+    @classmethod
+    def make_connection_string(cls, db_host=None, db_name=None, db_user=None, db_password=None):
+        ge = os.environ.get
+        db_host = db_host or ge('DATASTORE_HOST') or ge('DB_HOST')
+        db_name = db_name or ge('DATASTORE_NAME') or ge('DB_NAME')
+        db_user = db_user or ge('DATASTORE_USERNAME') or ge('DB_USERNAME')
+        db_password = db_password or ge('DATASTORE_PASSWORD') or ge('DB_PASSWORD')
+        return 'postgres://{}:{}@{}:5432/{}'.format(db_user, db_password, db_host, db_name)
+
+    def schema_information(self):
+        return SchemaInformation(engine=self.engine)
+
+    def access_data(self):
+        return DataAccess(engine=self.engine)
+
     def access_schema(self, schema_name):
-        return DataAccess(self.engine, schema_name)
+        if schema_name in self.providers:
+            return self.providers[schema_name]
+        self.providers[schema_name] = SchemaAccess(schema_name, engine=self.engine)
+        return self.providers[schema_name]
 
-    '''
-    Schema Accessors
-    '''
+    def cleanup(self):
+        for schema_name, provider in self.providers.items():
+            provider.cleanup()
 
-    def get_schemas(self):
-        return self.schemas
 
-    def is_system_schema(self, schema_name):
-        # PostgreSQL and PostGIS system schemas
-        system_schemas = ["information_schema", "tiger", "tiger_data", "topology", "public"]
-        return schema_name in system_schemas
+broker = AccessBroker()
 
-    def has_required_ealgis_tables(self, schema_name):
+
+def exit_handler():
+    broker.cleanup()
+
+
+atexit.register(exit_handler)
+
+
+class SchemaInformation():
+    """
+    provide information about EAlGIS data schemas within the datastore
+    """
+
+    # PostgreSQL and PostGIS system schemas
+    system_schemas = ["information_schema", "tiger", "tiger_data", "topology", "public"]
+
+    def __init__(self, engine=None):
+        self.engine = engine or broker.engine
+        self.inspector = inspect(self.engine)
+        self.compliant = [
+            t for t in self.inspector.get_schema_names() if
+            t not in self.system_schemas and self._has_required_ealgis_tables(t)]
+
+    @classmethod
+    def _is_system_schema(cls, schema_name):
+        return schema_name in cls.system_schemas
+
+    def _has_required_ealgis_tables(self, schema_name):
         required_tables = ["ealgis_metadata", "table_info", "column_info", "geometry_linkage", "geometry_source", "geometry_source_projection"]
         table_names = self.inspector.get_table_names(schema=schema_name)
         return set(required_tables).issubset(table_names)
 
     @lru_cache(maxsize=None)
     def get_geometry_schemas(self):
-        def is_compliant_schema(schema_name):
-            """determines if a given schema is EAlGIS-compliant"""
-
-            if self.has_required_ealgis_tables(schema_name):
-                db = broker.Provide(schema_name)
+        def is_geometry_schema(schema_name):
+            with broker.access_schema(schema_name) as db:
                 GeometrySource = db.get_table_class("geometry_source")
-
                 # The schema must have at least some rows in geometry_sources
                 if db.session.query(GeometrySource).first() is not None:
                     return True
-            return False
+                return False
 
-        schemas = []
-        for schema_name in self.get_schemas():
-            if self.is_system_schema(schema_name) is False:
-                if is_compliant_schema(schema_name):
-                    schemas.append(schema_name)
-        return schemas
+        return [t for t in self.compliant if is_geometry_schema(t)]
 
     @lru_cache(maxsize=None)
     def get_ealgis_schemas(self):
-        def is_compliant_schema(schema_name):
-            """determines if a given schema is EAlGIS-compliant"""
-
-            if self.has_required_ealgis_tables(schema_name):
-                db = broker.Provide(schema_name)
+        def is_data_schema(schema_name):
+            with broker.access_schema(schema_name) as db:
                 ColumnInfo = db.get_table_class("column_info")
-
                 # The schema must have at least some rows in column_info
                 # If not, it's probably just a geometry/shapes schema
                 if db.session.query(ColumnInfo).first() is not None:
                     return True
-            return False
+                return False
 
-        schemas = []
-        for schema_name in self.get_schemas():
-            if self.is_system_schema(schema_name) is False:
-                if is_compliant_schema(schema_name):
-                    schemas.append(schema_name)
-        return schemas
+        return [t for t in self.compliant if is_data_schema(t)]
+
+
+class DataAccess(EngineInfo):
+    """
+    Access the datastore.
+    None of the methods on this class are bound to schemas.
+    To access a schema, see the subclass SchemaAccess
+    """
+
+    def __init__(self, engine=None):
+        Session = sessionmaker()
+        self.engine = engine or broker.engine
+        Session.configure(bind=self.engine)
+        self.session = Session()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, type, value, traceback):
+        self.cleanup()
+
+    def cleanup(self):
+        self.session.close()
+
+    def access_schema(self, schema_name):
+        return SchemaAccess(schema_name, engine=self.engine)
+
+    def get_summary_stats_for_layer(self, layer):
+        SQL_TEMPLATE = """
+            SELECT
+                MIN(sq.q),
+                MAX(sq.q),
+                STDDEV(sq.q)
+            FROM ({query}) AS sq"""
+
+        (min, max, stddev) = self.session.execute(SQL_TEMPLATE.format(query=layer["_postgis_query"])).first()
+
+        return {
+            "min": min,
+            "max": max,
+            "stddev": stddev if stddev is not None else 0,
+        }
+
+    def get_bbox_for_layer(self, layer):
+        SQL_TEMPLATE = """
+            SELECT
+                ST_XMin(latlon_bbox) AS minx,
+                ST_XMax(latlon_bbox) AS maxx,
+                ST_YMin(latlon_bbox) AS miny,
+                ST_YMax(latlon_bbox) as maxy
+            FROM (
+                SELECT
+                    -- Eugh
+                    Box2D(ST_GeomFromText(ST_AsText(ST_Transform(ST_SetSRID(ST_Extent(geom_3857), 3857), 4326)))) AS latlon_bbox
+                FROM (
+                    {query}
+                ) AS exp
+            ) AS bbox;
+        """
+
+        return dict(self.session.execute(SQL_TEMPLATE.format(query=layer["_postgis_query"])).first())
+
+    def get_summary_stats_for_column(self, column, table):
+        SQL_TEMPLATE = """
+            SELECT
+                MIN(sq.q),
+                MAX(sq.q),
+                STDDEV(sq.q)
+            FROM (SELECT {col_name} AS q FROM {schema_name}.{table_name}) AS sq"""
+
+        (min, max, stddev) = self.session.execute(SQL_TEMPLATE.format(col_name=column.name, schema_name=self._schema_name, table_name=table.name)).first()
+
+        return {
+            "min": min,
+            "max": max,
+            "stddev": stddev,
+        }
+
+
+class SchemaAccess(DataAccess):
+    """
+    access a data schema within the datastore
+    """
+
+    def __init__(self, schema_name, engine=None):
+        super().__init__(engine=engine)
+        self._schema_name = schema_name
+        #
+        self.classes = {}
+        self.class_version = Counter()
+        #
+        _, tables = store.load_schema(schema_name)
+        self.tables = dict((t.name, t) for t in tables)
+        self.table_cache = {}
+        self.class_names_used = Counter()
+        self.classes = dict((t.name, self.get_table_class(t.name)) for t in tables)
+
+    def dbschema(self):
+        return self._schema_name
 
     '''
     Database Table Accessors
@@ -180,31 +251,32 @@ class DataAccess():
             return False
 
     def get_table(self, table_name):
-        return sqlalchemy.Table(table_name, sqlalchemy.MetaData(), schema=self._schema_name, autoload=True, autoload_with=self.engine.engine)
+        return sqlalchemy.Table(table_name, sqlalchemy.MetaData(), schema=self._schema_name, autoload=True, autoload_with=self.engine)
 
     def get_table_names(self):
         "this is a more lightweight approach to getting table names from the db that avoids all of that messy reflection"
         "c.f. http://docs.sqlalchemy.org/en/rel_0_9/core/reflection.html?highlight=inspector#fine-grained-reflection-with-inspector"
-        inspector = inspect(self.engine.engine)
+        inspector = inspect(self.engine)
         return inspector.get_table_names(schema=self._schema_name)
 
-    def get_table_class(self, table_name):
+    def get_table_class(self, table_name, refresh=False):
         """
         table definitions may change over time (as the result of the addition of columns, ...)
         hence we do not cache the reflected class instances this function creates
         """
-        self.class_names_used[table_name] += 1
-        count = self.class_names_used[table_name]
-        nm = "Table_{}.{}".format(self._schema_name, table_name)
-        if count > 1:
-            nm = '{}_{}'.format(nm, count)
-        tc = type(nm, (Base,), {'__table__': self.get_table(table_name)})
-        return tc
+        if refresh or table_name not in self.table_cache:
+            self.class_names_used[table_name] += 1
+            count = self.class_names_used[table_name]
+            nm = "Table_{}.{}".format(self._schema_name, table_name)
+            if count > 1:
+                nm = '{}_{}'.format(nm, count)
+            self.table_cache[table_name] = type(nm, (Base,), {'__table__': self.get_table(table_name)})
+        return self.table_cache[table_name]
 
-    def get_table_class_by_id(self, table_id):
+    def get_table_class_by_id(self, table_id, **kwargs):
         try:
             table_info = self.get_table_info_by_id(table_id)
-            return self.get_table_class(table_info.name)
+            return self.get_table_class(table_info.name, **kwargs)
         except sqlalchemy.orm.exc.NoResultFound:
             raise Exception("could not retrieve table class for table `{}'".format(table_id))
 
@@ -287,6 +359,8 @@ class DataAccess():
 
         if len(geom_columns) > 1:
             raise Exception("more than one geometry column for srid '{srid}'?".format(srid=srid))
+        elif len(geom_columns) == 0:
+            raise Exception("no geometry columns for srid '{srid}'?".format(srid=srid))
         return geom_columns[0]
 
     '''
@@ -426,22 +500,6 @@ class DataAccess():
         except sqlalchemy.orm.exc.NoResultFound:
             raise Exception("could not find any columns for table '{}'".format(tableinfo_id))
 
-    def get_summary_stats_for_column(self, column, table):
-        SQL_TEMPLATE = """
-            SELECT
-                MIN(sq.q),
-                MAX(sq.q),
-                STDDEV(sq.q)
-            FROM (SELECT {col_name} AS q FROM {schema_name}.{table_name}) AS sq"""
-
-        (min, max, stddev) = self.session.execute(SQL_TEMPLATE.format(col_name=column.name, schema_name=self._schema_name, table_name=table.name)).first()
-
-        return {
-            "min": min,
-            "max": max,
-            "stddev": stddev,
-        }
-
     '''
     Data Attribute Accessors
     '''
@@ -466,56 +524,21 @@ class DataAccess():
         except sqlalchemy.orm.exc.NoResultFound:
             raise Exception("could not retrieve ealgis_metadata table")
 
-    def get_summary_stats_for_layer(self, layer):
-        SQL_TEMPLATE = """
-            SELECT
-                MIN(sq.q),
-                MAX(sq.q),
-                STDDEV(sq.q)
-            FROM ({query}) AS sq"""
-
-        (min, max, stddev) = self.session.execute(SQL_TEMPLATE.format(query=layer["_postgis_query"])).first()
-
-        return {
-            "min": min,
-            "max": max,
-            "stddev": stddev if stddev is not None else 0,
-        }
-
-    def get_bbox_for_layer(self, layer):
-        SQL_TEMPLATE = """
-            SELECT
-                ST_XMin(latlon_bbox) AS minx,
-                ST_XMax(latlon_bbox) AS maxx,
-                ST_YMin(latlon_bbox) AS miny,
-                ST_YMax(latlon_bbox) as maxy
-            FROM (
-                SELECT
-                    -- Eugh
-                    Box2D(ST_GeomFromText(ST_AsText(ST_Transform(ST_SetSRID(ST_Extent(geom_3857), 3857), 4326)))) AS latlon_bbox
-                FROM (
-                    {query}
-                ) AS exp
-            ) AS bbox;
-        """
-
-        return dict(self.session.execute(SQL_TEMPLATE.format(query=layer["_postgis_query"])).first())
-
 
 class DataLoaderFactory:
-    def __init__(self, db_name, clean=True):
+    def __init__(self, clean=True, **kwargs):
         # create database and connect
-        connection_string = DataAccess.make_connection_string(db_name)
-        self._engine = create_engine(connection_string)
+        connection_string = AccessBroker.make_connection_string(**kwargs)
+        self.engine = create_engine(connection_string)
         if self._create_database(connection_string, clean):
             self._create_extensions(connection_string)
 
-    def make_data_access(self, schema_name):
-        return DataAccess(self._engine, schema_name)
+    def make_schema_access(self, schema_name):
+        return SchemaAccess(schema_name, engine=self.engine)
 
     def make_loader(self, schema_name, **loader_kwargs):
         self._create_schema(schema_name)
-        return DataLoader(self._engine, schema_name, **loader_kwargs)
+        return DataLoader(self.engine, schema_name, **loader_kwargs)
 
     def _create_database(self, connection_string, clean):
         # Initialise the database
@@ -529,25 +552,26 @@ class DataLoaderFactory:
 
     def _create_schema(self, schema_name):
         logger.info("create schema: %s" % schema_name)
-        self._engine.execute(CreateSchema(schema_name))
+        self.engine.execute(CreateSchema(schema_name))
 
     def _create_extensions(self, connection_string):
         extensions = ('postgis', 'postgis_topology')
         for extension in extensions:
             try:
                 logger.info("creating extension: %s" % extension)
-                self._engine.execute('CREATE EXTENSION %s;' % extension)
+                self.engine.execute('CREATE EXTENSION %s;' % extension)
             except sqlalchemy.exc.ProgrammingError as e:
                 if 'already exists' not in str(e):
                     print("couldn't load: %s (%s)" % (extension, e))
 
 
-class DataLoader(DataAccess):
+class DataLoader(SchemaAccess):
     def __init__(self, engine, schema_name, mandatory_srids=None):
+        self.engine = engine
         self._mandatory_srids = mandatory_srids
         metadata, tables = store.load_schema(schema_name)
         metadata.create_all(engine)
-        super(DataLoader, self).__init__(engine, schema_name)
+        super().__init__(schema_name, engine=self.engine)
 
     def set_table_metadata(self, table_name, meta_dict):
         ti = self.get_table_info(table_name)
@@ -567,16 +591,6 @@ class DataLoader(DataAccess):
     def register_column(self, table_name, column_name, meta_dict):
         self.register_columns(table_name, [column_name, meta_dict])
 
-    def repair_geometry(self, geometry_source):
-        # FIXME: clean this up, make generic: or delete, and move into loaders?
-        logger.debug("running geometry QC and repair: %s" % (geometry_source.table_info.name))
-        cls = self.get_table_class(geometry_source.table_info.name)
-        geom_attr = getattr(cls, geometry_source.column)
-        self.session.execute(sqlalchemy.update(
-            cls.__table__, values={
-                geom_attr: sqlalchemy.func.st_multi(sqlalchemy.func.st_buffer(geom_attr, 0))
-            }).where(sqlalchemy.func.st_isvalid(geom_attr) == False))  # noqa
-
     def reproject(self, geometry_source_id, from_column, to_srid):
         # add the geometry column
         GeometrySource = self.classes['geometry_source']
@@ -594,7 +608,7 @@ class DataLoader(DataAccess):
         self.session.commit()
         # committed, so we can introspect it, and then transform original
         # geometry data to this SRID
-        cls = self.get_table_class(table_info.name)
+        cls = self.get_table_class(table_info.name, refresh=True)
         tbl = cls.__table__
         self.session.execute(
             sqlalchemy.update(
@@ -633,7 +647,7 @@ class DataLoader(DataAccess):
         self.session.execute("ALTER TABLE %s.%s ADD COLUMN %s numeric" % (self._schema_name, table_info.name, new_column))
         self.session.commit()
 
-        cls = self.get_table_class(table_info.name)
+        cls = self.get_table_class(table_info.name, refresh=True)
         tbl = cls.__table__
 
         self.session.execute(
@@ -710,7 +724,7 @@ class DataLoader(DataAccess):
         self.session.commit()
 
     def add_dependency(self, required_schema):
-        dep_access = DataAccess(self.engine, required_schema)
+        dep_access = SchemaAccess(required_schema, engine=self.engine)
         metadata_cls = dep_access.get_table_class('ealgis_metadata')
         metadata = self.session.query(metadata_cls).one()
         Dependencies = self.classes['dependencies']
@@ -725,7 +739,10 @@ class DataLoader(DataAccess):
         self.session.commit()
 
     def result(self):
-        return DataLoaderResult(self._schema_name, self.engineurl(), self.dbpassword())
+        return DataLoaderResult(
+            self._schema_name,
+            self.engine.engine.url,
+            self.engine.engine.url.password)
 
 
 class DataLoaderResult:
