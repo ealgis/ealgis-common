@@ -458,6 +458,7 @@ class DataAccess():
     Miscellaneous
     '''
 
+    @lru_cache(maxsize=None)
     def get_schema_metadata(self):
         EalgisMetadata = self.classes['ealgis_metadata']
         try:
