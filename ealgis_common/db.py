@@ -374,25 +374,42 @@ class SchemaAccess(DataAccess):
         except sqlalchemy.orm.exc.NoResultFound:
             raise Exception("could not retrieve table_info row for `{}'".format(table_name))
 
-    def get_table_info_by_id(self, table_id, geo_source_id=None):
-        GeometryLinkage = self.classes['geometry_linkage']
-        TableInfo = self.classes['table_info']
-        try:
-            query = self.session.query(TableInfo)
-            if geo_source_id is not None:
-                query = query.join(GeometryLinkage, TableInfo.id == GeometryLinkage.attr_table_id)\
-                    .filter(GeometryLinkage.geometry_source_id == geo_source_id)
-
-            return query.filter(TableInfo.id == table_id).one()
-        except sqlalchemy.orm.exc.NoResultFound:
-            raise Exception("could not retrieve table_info row for `{}'".format(table_id))
+    def get_table_info_by_id(self, table_id):
+        result = self.get_table_info_by_ids([table_id])
+        if len(result) == 0:
+            raise Exception("could not retrieve table_info for table id '{}'".format(table_id))
+        else:
+            return result[0]
 
     def get_table_info_by_ids(self, table_ids):
         TableInfo = self.classes['table_info']
         try:
             return self.session.query(TableInfo).filter(TableInfo.id.in_(table_ids)).all()
         except sqlalchemy.orm.exc.NoResultFound:
-            raise Exception("could not retrieve column_info a range of column names")
+            raise Exception("could not retrieve table_info for a range of table ids")
+
+    def get_table_info_and_geometry_linkage_by_id(self, table_id, geo_source_id=None):
+        result = self.get_table_info_and_geometry_linkage_by_ids([table_id], geo_source_id)
+        if len(result) == 0:
+            raise Exception("could not retrieve table_info for table id '{}'".format(table_id))
+        else:
+            return result[0]
+
+    def get_table_info_and_geometry_linkage_by_ids(self, table_ids=None, geo_source_id=None):
+        TableInfo = self.classes['table_info']
+        GeometryLinkage = self.classes['geometry_linkage']
+        try:
+            query = self.session.query(TableInfo, GeometryLinkage).join(GeometryLinkage, TableInfo.id == GeometryLinkage.attr_table_id)
+
+            if table_ids is not None:
+                query = query.filter(TableInfo.id.in_(table_ids))
+
+            if geo_source_id is not None:
+                query = query.filter(GeometryLinkage.geometry_source_id == geo_source_id)
+
+            return query.all()
+        except sqlalchemy.orm.exc.NoResultFound:
+            raise Exception("could not retrieve table_info for a range of table ids")
 
     def get_geometry_relation(self, from_source, to_source):
         GeometryRelation = self.classes['geometry_relation']
@@ -403,22 +420,11 @@ class SchemaAccess(DataAccess):
         except sqlalchemy.orm.exc.NoResultFound:
             return None
 
-    def get_data_tables(self, geo_source_id=None):
-        TableInfo = self.classes['table_info']
-        try:
-            if geo_source_id is None:
-                return self.session.query(TableInfo).all()
-            else:
-                GeometryLinkage = self.classes['geometry_linkage']
-                return self.session.query(TableInfo).join(GeometryLinkage, TableInfo.id == GeometryLinkage.attr_table_id).filter(GeometryLinkage.geometry_source_id == geo_source_id).all()
-        except sqlalchemy.orm.exc.NoResultFound:
-            raise Exception("could not retrieve table_info tables")
-
     def search_tables(self, search_terms, search_terms_excluded, geo_source_id=None):
         GeometryLinkage = self.classes['geometry_linkage']
         TableInfo = self.classes['table_info']
         try:
-            query = self.session.query(TableInfo)\
+            query = self.session.query(TableInfo, GeometryLinkage)\
                 .join(GeometryLinkage, TableInfo.id == GeometryLinkage.attr_table_id)\
                 .filter(GeometryLinkage.geometry_source_id == geo_source_id)
 
@@ -449,13 +455,14 @@ class SchemaAccess(DataAccess):
         ColumnInfo = self.classes['column_info']
         TableInfo = self.classes['table_info']
         GeometryLinkage = self.classes['geometry_linkage']
+
         try:
-            query = self.session.query(ColumnInfo)
+            query = self.session.query(ColumnInfo, GeometryLinkage)\
+                .join(TableInfo, ColumnInfo.table_info_id == TableInfo.id)\
+                .join(GeometryLinkage, TableInfo.id == GeometryLinkage.attr_table_id)\
 
             if geo_source_id is not None:
-                query = query.join(TableInfo, ColumnInfo.table_info_id == TableInfo.id)\
-                    .join(GeometryLinkage, TableInfo.id == GeometryLinkage.attr_table_id)\
-                    .filter(GeometryLinkage.geometry_source_id == geo_source_id)
+                query = query.filter(GeometryLinkage.geometry_source_id == geo_source_id)
 
             column_names = [item.lower().strip() for item in column_names]
             return query.filter(sqlalchemy.func.lower(ColumnInfo.name).in_(column_names)).all()
@@ -463,7 +470,11 @@ class SchemaAccess(DataAccess):
             raise Exception("could not retrieve column_info a range of column names")
 
     def get_column_info_by_name(self, column_name, geo_source_id=None):
-        return self.get_column_info_by_names([column_name], geo_source_id)
+        result = self.get_column_info_by_names([column_name], geo_source_id)
+        if len(result) == 0:
+            return []
+        else:
+            return [column for column, geometrylinkage in result]
 
     def search_columns(self, search_terms, search_terms_excluded, geo_source_id=None):
         GeometryLinkage = self.classes['geometry_linkage']
@@ -484,7 +495,11 @@ class SchemaAccess(DataAccess):
                 query = query.filter(not_(ColumnInfo.metadata_json["type"].astext.ilike("%{}%".format(term))))
 
             tableIds = query.distinct().all()
-            return self.get_table_info_by_ids(tableIds)
+
+            if len(tableIds) > 0:
+                return self.get_table_info_and_geometry_linkage_by_ids(tableIds)
+            else:
+                return []
         except sqlalchemy.orm.exc.NoResultFound:
             raise Exception("could not search columns")
 
