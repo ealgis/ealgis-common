@@ -411,6 +411,17 @@ class SchemaAccess(DataAccess):
         except sqlalchemy.orm.exc.NoResultFound:
             raise Exception("could not retrieve table_info for a range of table ids")
 
+    def get_table_info_and_geometry_linkage_by_family_and_geometry(self, table_family, geo_source_id):
+        GeometryLinkage = self.classes['geometry_linkage']
+        TableInfo = self.classes['table_info']
+        try:
+            return self.session.query(TableInfo, GeometryLinkage)\
+                .join(GeometryLinkage, TableInfo.id == GeometryLinkage.attr_table_id)\
+                .filter(TableInfo.metadata_json["family"].astext == table_family)\
+                .filter(GeometryLinkage.geometry_source_id == geo_source_id).one()
+        except sqlalchemy.orm.exc.NoResultFound:
+            raise Exception("could not find a matching table for this geometry source")
+
     def get_geometry_relation(self, from_source, to_source):
         GeometryRelation = self.classes['geometry_relation']
         try:
