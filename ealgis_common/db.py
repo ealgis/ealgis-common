@@ -10,9 +10,9 @@ from sqlalchemy.sql import not_
 from ealgis_data_schema.schema_v1 import store
 from collections import Counter
 from .util import cmdrun
+import traceback as tb
 import os
 import sqlalchemy
-import atexit
 from .util import make_logger
 
 Base = declarative_base()
@@ -76,19 +76,8 @@ class AccessBroker(EngineInfo):
         self.providers[schema_name] = SchemaAccess(schema_name, engine=self.engine)
         return self.providers[schema_name]
 
-    def cleanup(self):
-        for schema_name, provider in self.providers.items():
-            provider.cleanup()
-
 
 broker = AccessBroker()
-
-
-def exit_handler():
-    broker.cleanup()
-
-
-atexit.register(exit_handler)
 
 
 class SchemaInformation():
@@ -117,28 +106,23 @@ class SchemaInformation():
 
     @lru_cache(maxsize=None)
     def get_geometry_schemas(self):
-        def is_geometry_schema(schema_name):
+        r = []
+        for schema_name in self.compliant:
             with broker.access_schema(schema_name) as db:
                 GeometrySource = db.get_table_class("geometry_source")
-                # The schema must have at least some rows in geometry_sources
                 if db.session.query(GeometrySource).first() is not None:
-                    return True
-                return False
-
-        return [t for t in self.compliant if is_geometry_schema(t)]
+                    r.append(schema_name)
+        return r
 
     @lru_cache(maxsize=None)
     def get_ealgis_schemas(self):
-        def is_data_schema(schema_name):
+        r = []
+        for schema_name in self.compliant:
             with broker.access_schema(schema_name) as db:
                 ColumnInfo = db.get_table_class("column_info")
-                # The schema must have at least some rows in column_info
-                # If not, it's probably just a geometry/shapes schema
                 if db.session.query(ColumnInfo).first() is not None:
-                    return True
-                return False
-
-        return [t for t in self.compliant if is_data_schema(t)]
+                    r.append(schema_name)
+        return r
 
 
 class DataAccess(EngineInfo):
@@ -149,19 +133,22 @@ class DataAccess(EngineInfo):
     """
 
     def __init__(self, engine=None):
-        Session = sessionmaker()
+        self.Session = sessionmaker()
         self.engine = engine or broker.engine
-        Session.configure(bind=self.engine)
-        self.session = Session()
+        self.Session.configure(bind=self.engine)
+        self.session = None
 
     def __enter__(self):
+        logger.critical("{} >> : {}".format(id(self), tb.format_stack(limit=2)))
+        if self.session is not None:
+            raise Exception("{} nested access to the schema".format(id(self)))
+        self.session = self.Session()
         return self
 
     def __exit__(self, type, value, traceback):
-        self.cleanup()
-
-    def cleanup(self):
+        logger.critical("{} << : {}".format(id(self), tb.format_stack(limit=2)))
         self.session.close()
+        self.session = None
 
     def access_schema(self, schema_name):
         return SchemaAccess(schema_name, engine=self.engine)
@@ -201,7 +188,7 @@ class DataAccess(EngineInfo):
 
         return dict(self.session.execute(SQL_TEMPLATE.format(query=layer["_postgis_query"])).first())
 
-    def get_summary_stats_for_column(self, column, table):
+    def get_summary_stats_for_column(self, lumn, table):
         SQL_TEMPLATE = """
             SELECT
                 MIN(sq.q),
