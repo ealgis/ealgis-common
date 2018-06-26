@@ -116,7 +116,7 @@ class Database(EngineInfo):
 ealdb = Database()
 
 
-class SchemaReflection:
+class SchemaReflection(EngineInfo):
     """
     reflects a schema, giving us ORM access to the tables within it
     """
@@ -600,6 +600,9 @@ class DataLoader(SchemaAccess):
         metadata, tables = store.load_schema(schema_name)
         metadata.create_all(engine)
         super().__init__(SchemaReflection(schema_name, self.engine))
+
+    def access_schema(self, schema_name):
+        return SchemaAccess(SchemaReflection(schema_name, self.engine))
 
     def set_table_metadata(self, table_name, meta_dict):
         ti = self.get_table_info(table_name)
