@@ -41,15 +41,23 @@ class EngineInfo():
         return self.engine.engine.url.password
 
 
-class AccessBroker(EngineInfo):
+class Database(EngineInfo):
     """
-    a global singleton: we want to have a single SQLalchemy engine, so we're
-    not continually opening connections to the database
+    This should be a global singleton in the application. No SQL sessions are used
+    by any of the methods in this class. The single global `engine` instance is stored
+    within this class.
     """
 
+    # PostgreSQL and PostGIS system schemas
+    system_schemas = ["information_schema", "tiger", "tiger_data", "topology", "public"]
+
     def __init__(self):
-        self.providers = {}
         self.engine = self.make_engine()
+        self.inspector = inspect(self.engine)
+        self._reflection_cache = {}
+        self.compliant = [
+            t for t in self.inspector.get_schema_names() if
+            t not in self.system_schemas and self._has_required_ealgis_tables(t)]
 
     @classmethod
     def make_engine(cls, **kwargs):
@@ -64,36 +72,16 @@ class AccessBroker(EngineInfo):
         db_password = db_password or ge('DATASTORE_PASSWORD') or ge('DB_PASSWORD')
         return 'postgres://{}:{}@{}:5432/{}'.format(db_user, db_password, db_host, db_name)
 
-    def schema_information(self):
-        return SchemaInformation(engine=self.engine)
+    def get_schema_reflection(self, schema_name):
+        if schema_name not in self._reflection_cache:
+            self._reflection_cache[schema_name] = SchemaReflection(schema_name, self.engine)
+        return self._reflection_cache[schema_name]
 
     def access_data(self):
         return DataAccess(engine=self.engine)
 
     def access_schema(self, schema_name):
-        if schema_name in self.providers:
-            return self.providers[schema_name]
-        self.providers[schema_name] = SchemaAccess(schema_name, engine=self.engine)
-        return self.providers[schema_name]
-
-
-broker = AccessBroker()
-
-
-class SchemaInformation():
-    """
-    provide information about EAlGIS data schemas within the datastore
-    """
-
-    # PostgreSQL and PostGIS system schemas
-    system_schemas = ["information_schema", "tiger", "tiger_data", "topology", "public"]
-
-    def __init__(self, engine=None):
-        self.engine = engine or broker.engine
-        self.inspector = inspect(self.engine)
-        self.compliant = [
-            t for t in self.inspector.get_schema_names() if
-            t not in self.system_schemas and self._has_required_ealgis_tables(t)]
+        return SchemaAccess(self.get_schema_reflection(schema_name))
 
     @classmethod
     def _is_system_schema(cls, schema_name):
@@ -108,7 +96,7 @@ class SchemaInformation():
     def get_geometry_schemas(self):
         r = []
         for schema_name in self.compliant:
-            with broker.access_schema(schema_name) as db:
+            with self.access_schema(schema_name) as db:
                 GeometrySource = db.get_table_class("geometry_source")
                 if db.session.query(GeometrySource).first() is not None:
                     r.append(schema_name)
@@ -118,11 +106,63 @@ class SchemaInformation():
     def get_ealgis_schemas(self):
         r = []
         for schema_name in self.compliant:
-            with broker.access_schema(schema_name) as db:
+            with self.access_schema(schema_name) as db:
                 ColumnInfo = db.get_table_class("column_info")
                 if db.session.query(ColumnInfo).first() is not None:
                     r.append(schema_name)
         return r
+
+
+# global singleton, so that we have one `engine` across the whole application
+ealdb = Database()
+
+
+class SchemaReflection:
+    """
+    reflects a schema, giving us ORM access to the tables within it
+    """
+
+    def __init__(self, schema_name, engine):
+        self._schema_name = schema_name
+        self.engine = engine
+        self.class_version = Counter()
+        self.table_cache = {}
+        self.class_names_used = Counter()
+        #
+        _, tables = store.load_schema(schema_name)
+        self.tables = dict((t.name, t) for t in tables)
+        self.classes = dict((t.name, self.get_table_class(t.name)) for t in tables)
+
+    def get_table_names(self):
+        "this is a more lightweight approach to getting table names from the db that avoids all of that messy reflection"
+        "c.f. http://docs.sqlalchemy.org/en/rel_0_9/core/reflection.html?highlight=inspector#fine-grained-reflection-with-inspector"
+        inspector = inspect(self.engine)
+        return inspector.get_table_names(schema=self._schema_name)
+
+    def get_table_class(self, table_name, refresh=False):
+        """
+        table definitions may change over time (as the result of the addition of columns, ...)
+        use `refresh=True` to if getting a table class when this may be the case (e.g. from
+        a data loader)
+        """
+        if refresh or table_name not in self.table_cache:
+            self.class_names_used[table_name] += 1
+            count = self.class_names_used[table_name]
+            nm = "Table_{}.{}".format(self._schema_name, table_name)
+            if count > 1:
+                nm = '{}_{}'.format(nm, count)
+            self.table_cache[table_name] = type(nm, (Base,), {'__table__': self.get_table(table_name)})
+        return self.table_cache[table_name]
+
+    def have_table(self, table_name):
+        try:
+            self.get_table(table_name)
+            return True
+        except sqlalchemy.exc.NoSuchTableError:
+            return False
+
+    def get_table(self, table_name):
+        return sqlalchemy.Table(table_name, sqlalchemy.MetaData(), schema=self._schema_name, autoload=True, autoload_with=self.engine)
 
 
 class DataAccess(EngineInfo):
@@ -132,26 +172,21 @@ class DataAccess(EngineInfo):
     To access a schema, see the subclass SchemaAccess
     """
 
-    def __init__(self, engine=None):
+    def __init__(self, engine):
         self.Session = sessionmaker()
-        self.engine = engine or broker.engine
+        self.engine = engine
         self.Session.configure(bind=self.engine)
         self.session = None
 
     def __enter__(self):
-        logger.critical("{} >> : {}".format(id(self), tb.format_stack(limit=2)))
         if self.session is not None:
             raise Exception("{} nested access to the schema".format(id(self)))
         self.session = self.Session()
         return self
 
     def __exit__(self, type, value, traceback):
-        logger.critical("{} << : {}".format(id(self), tb.format_stack(limit=2)))
         self.session.close()
         self.session = None
-
-    def access_schema(self, schema_name):
-        return SchemaAccess(schema_name, engine=self.engine)
 
     def get_summary_stats_for_layer(self, layer):
         SQL_TEMPLATE = """
@@ -188,7 +223,7 @@ class DataAccess(EngineInfo):
 
         return dict(self.session.execute(SQL_TEMPLATE.format(query=layer["_postgis_query"])).first())
 
-    def get_summary_stats_for_column(self, lumn, table):
+    def get_summary_stats_for_column(self, column, table):
         SQL_TEMPLATE = """
             SELECT
                 MIN(sq.q),
@@ -210,18 +245,11 @@ class SchemaAccess(DataAccess):
     access a data schema within the datastore
     """
 
-    def __init__(self, schema_name, engine=None):
-        super().__init__(engine=engine)
-        self._schema_name = schema_name
-        #
-        self.classes = {}
-        self.class_version = Counter()
-        #
-        _, tables = store.load_schema(schema_name)
-        self.tables = dict((t.name, t) for t in tables)
-        self.table_cache = {}
-        self.class_names_used = Counter()
-        self.classes = dict((t.name, self.get_table_class(t.name)) for t in tables)
+    def __init__(self, reflect):
+        super().__init__(engine=reflect.engine)
+        self._reflect = reflect
+        self.classes = self._reflect.classes
+        self._schema_name = reflect._schema_name
 
     def dbschema(self):
         return self._schema_name
@@ -230,35 +258,17 @@ class SchemaAccess(DataAccess):
     Database Table Accessors
     '''
 
-    def have_table(self, table_name):
-        try:
-            self.get_table(table_name)
-            return True
-        except sqlalchemy.exc.NoSuchTableError:
-            return False
+    def get_table_names(self, *args, **kwargs):
+        return self._reflect.get_table_names(*args, **kwargs)
 
-    def get_table(self, table_name):
-        return sqlalchemy.Table(table_name, sqlalchemy.MetaData(), schema=self._schema_name, autoload=True, autoload_with=self.engine)
+    def get_table_class(self, *args, **kwargs):
+        return self._reflect.get_table_class(*args, **kwargs)
 
-    def get_table_names(self):
-        "this is a more lightweight approach to getting table names from the db that avoids all of that messy reflection"
-        "c.f. http://docs.sqlalchemy.org/en/rel_0_9/core/reflection.html?highlight=inspector#fine-grained-reflection-with-inspector"
-        inspector = inspect(self.engine)
-        return inspector.get_table_names(schema=self._schema_name)
+    def have_table(self, *args, **kwargs):
+        return self._reflect.have_table(*args, **kwargs)
 
-    def get_table_class(self, table_name, refresh=False):
-        """
-        table definitions may change over time (as the result of the addition of columns, ...)
-        hence we do not cache the reflected class instances this function creates
-        """
-        if refresh or table_name not in self.table_cache:
-            self.class_names_used[table_name] += 1
-            count = self.class_names_used[table_name]
-            nm = "Table_{}.{}".format(self._schema_name, table_name)
-            if count > 1:
-                nm = '{}_{}'.format(nm, count)
-            self.table_cache[table_name] = type(nm, (Base,), {'__table__': self.get_table(table_name)})
-        return self.table_cache[table_name]
+    def get_table(self, *args, **kwargs):
+        return self._reflect.get_table(*args, **kwargs)
 
     def get_table_class_by_id(self, table_id, **kwargs):
         try:
@@ -530,13 +540,14 @@ class SchemaAccess(DataAccess):
 class DataLoaderFactory:
     def __init__(self, clean=True, **kwargs):
         # create database and connect
-        connection_string = AccessBroker.make_connection_string(**kwargs)
+        connection_string = Database.make_connection_string(**kwargs)
         self.engine = create_engine(connection_string)
         if self._create_database(connection_string, clean):
             self._create_extensions(connection_string)
 
     def make_schema_access(self, schema_name):
-        return SchemaAccess(schema_name, engine=self.engine)
+        reflect = SchemaReflection(schema_name, self.engine)
+        return SchemaAccess(reflect)
 
     def make_loader(self, schema_name, **loader_kwargs):
         self._create_schema(schema_name)
