@@ -10,7 +10,6 @@ from sqlalchemy.sql import not_
 from ealgis_data_schema.schema_v1 import store
 from collections import Counter
 from .util import cmdrun
-import traceback as tb
 import os
 import sqlalchemy
 from .util import make_logger
@@ -176,9 +175,13 @@ class DataAccess(EngineInfo):
         self.Session = sessionmaker()
         self.engine = engine
         self.Session.configure(bind=self.engine)
+        # note: this is to ensure that any callers not using `with` will break
         self.session = None
 
     def __enter__(self):
+        # it shouldn't be possible for this instance to be used more than
+        # once at a time; we've hit bugs where threads have accidentally
+        # shared DataAccess instances, with breakage as a result
         if self.session is not None:
             raise Exception("{} nested access to the schema".format(id(self)))
         self.session = self.Session()
@@ -249,6 +252,7 @@ class SchemaAccess(DataAccess):
         super().__init__(engine=reflect.engine)
         self._reflect = reflect
         self.classes = self._reflect.classes
+        self.tables = self._reflect.tables
         self._schema_name = reflect._schema_name
 
     def dbschema(self):
@@ -595,7 +599,7 @@ class DataLoader(SchemaAccess):
         self._mandatory_srids = mandatory_srids
         metadata, tables = store.load_schema(schema_name)
         metadata.create_all(engine)
-        super().__init__(schema_name, engine=self.engine)
+        super().__init__(SchemaReflection(schema_name, self.engine))
 
     def set_table_metadata(self, table_name, meta_dict):
         ti = self.get_table_info(table_name)
@@ -748,14 +752,14 @@ class DataLoader(SchemaAccess):
         self.session.commit()
 
     def add_dependency(self, required_schema):
-        dep_access = SchemaAccess(required_schema, engine=self.engine)
-        metadata_cls = dep_access.get_table_class('ealgis_metadata')
-        metadata = self.session.query(metadata_cls).one()
-        Dependencies = self.classes['dependencies']
-        self.session.add(Dependencies(
-            name=required_schema,
-            uuid=metadata.uuid))
-        self.session.commit()
+        with SchemaAccess(SchemaReflection(required_schema, self.engine)) as dep_access:
+            metadata_cls = dep_access.get_table_class('ealgis_metadata')
+            metadata = self.session.query(metadata_cls).one()
+            Dependencies = self.classes['dependencies']
+            self.session.add(Dependencies(
+                name=required_schema,
+                uuid=metadata.uuid))
+            self.session.commit()
 
     def set_metadata(self, **kwargs):
         self.session.execute(
