@@ -12,6 +12,7 @@ from collections import Counter
 from .util import cmdrun
 import os
 import sqlalchemy
+import traceback as tb
 from .util import make_logger
 
 Base = declarative_base()
@@ -87,9 +88,13 @@ class Database(EngineInfo):
         return schema_name in cls.system_schemas
 
     def _has_required_ealgis_tables(self, schema_name):
-        required_tables = ["ealgis_metadata", "table_info", "column_info", "geometry_linkage", "geometry_source", "geometry_source_projection"]
-        table_names = self.inspector.get_table_names(schema=schema_name)
-        return set(required_tables).issubset(table_names)
+        try:
+            required_tables = ["ealgis_metadata", "table_info", "column_info", "geometry_linkage", "geometry_source", "geometry_source_projection"]
+            table_names = self.inspector.get_table_names(schema=schema_name)
+            return set(required_tables).issubset(table_names)
+        except sqlalchemy.exc.SQLAlchemyError:
+            logger.warning("Error while attemping to check schema for required tables: {}".format(schema_name))
+            logger.warning(tb.format_exc())
 
     @lru_cache(maxsize=None)
     def get_geometry_schemas(self):
@@ -105,10 +110,14 @@ class Database(EngineInfo):
     def get_ealgis_schemas(self):
         r = []
         for schema_name in self.compliant:
-            with self.access_schema(schema_name) as db:
-                ColumnInfo = db.get_table_class("column_info")
-                if db.session.query(ColumnInfo).first() is not None:
-                    r.append(schema_name)
+            try:
+                with self.access_schema(schema_name) as db:
+                    ColumnInfo = db.get_table_class("column_info")
+                    if db.session.query(ColumnInfo).first() is not None:
+                        r.append(schema_name)
+            except sqlalchemy.exc.SQLAlchemyError:
+                logger.warning("Error while attemping to inspect schema: {}".format(schema_name))
+                logger.warning(tb.format_exc())
         return r
 
 
