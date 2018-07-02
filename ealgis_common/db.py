@@ -745,7 +745,7 @@ class DataLoader(SchemaAccess):
                 self.reproject(source_id, column.name, gen_srid)
 
             # add pre-calculated area column for use by vector tile output
-            if geomtype == "POLYGON" or geomtype == "MULTIPOLYGON":
+            if geomtype == "POLYGON" or geomtype == "MULTIPOLYGON" or geomtype == "GEOMETRYCOLLECTION":
                 column = self.find_geom_column(table_name, 3857)
                 self.add_mvt_area_column(source_id, column)
         self.session.commit()
