@@ -748,6 +748,8 @@ class DataLoader(SchemaAccess):
             if geomtype == "POLYGON" or geomtype == "MULTIPOLYGON" or geomtype == "GEOMETRYCOLLECTION":
                 column = self.find_geom_column(table_name, 3857)
                 self.add_mvt_area_column(source_id, column)
+            else:
+                raise Exception("geometry `%s' will not be accessible: unknown geomtype %s" % (column.name, geomtype))
         self.session.commit()
         return self.get_table_info(table_name)
 
