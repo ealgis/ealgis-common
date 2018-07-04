@@ -10,7 +10,13 @@ class SequenceClassifier(object):
     def update(self, v):
         def test(cast):
             try:
-                cast(v)
+                # Allows empty strings to be treated as None/NULL by defaulting to int.
+                # Without this check they force columns from type int/float to string.
+                # Empty strings represent cells that are 'Not Applicable' in the
+                # scope of the value they represent. For more details see
+                # `handleNotApplicableCells` in aus_census_2016/attrs.py
+                if v != "":
+                    cast(v)
             except ValueError:
                 return False
             return True
