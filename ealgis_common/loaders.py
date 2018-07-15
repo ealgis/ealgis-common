@@ -79,18 +79,27 @@ class ZipAccess(DirectoryAccess):
 
 
 class RewrittenCSV(object):
-    def __init__(self, tmpdir, csvpath, mutate_row_cb=None):
+    def __init__(self, tmpdir, csvpath, mutate_row_cb=None, dialect='excel'):
         def default_mutate(line, row):
             return row
+
         if mutate_row_cb is None:
             mutate_row_cb = default_mutate
         self._tmpdir = tmpdir
         self._path = os.path.join(self._tmpdir, hashlib.sha1(csvpath.encode('utf8')).hexdigest() + '.csv')
         with open(csvpath, 'r') as csv_in:
             with open(self._path, 'w') as csv_out:
-                r = csv.reader(csv_in)
+                r = csv.reader(csv_in, dialect=dialect)
+
+                def mutate_iter():
+                    for line, row in enumerate(r):
+                        mutated_row = mutate_row_cb(line, row)
+                        if mutated_row is None:
+                            continue
+                        yield mutated_row
+
                 w = csv.writer(csv_out)
-                w.writerows((mutate_row_cb(line, row) for (line, row) in enumerate(r)))
+                w.writerows(mutate_iter())
 
     def get(self):
         return self._path
