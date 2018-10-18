@@ -121,10 +121,6 @@ class Database(EngineInfo):
         return r
 
 
-# global singleton, so that we have one `engine` across the whole application
-ealdb = Database()
-
-
 class SchemaReflection(EngineInfo):
     """
     reflects a schema, giving us ORM access to the tables within it
