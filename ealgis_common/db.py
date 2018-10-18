@@ -208,12 +208,12 @@ class DataAccess(EngineInfo):
                 STDDEV(sq.q)
             FROM ({query}) AS sq"""
 
-        (min, max, stddev) = self.session.execute(SQL_TEMPLATE.format(query=layer["_postgis_query"])).first()
+        (min_value, max_value, stddev) = self.session.execute(SQL_TEMPLATE.format(query=layer["_postgis_query"])).first()
 
         return {
-            "min": min,
-            "max": max,
-            "stddev": stddev if stddev is not None else 0,
+            "min": min_value or 0,
+            "max": max_value or 0,
+            "stddev": stddev or 0,
         }
 
     def get_bbox_for_layer(self, layer):
