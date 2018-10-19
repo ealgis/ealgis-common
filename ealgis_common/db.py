@@ -196,57 +196,6 @@ class DataAccess(EngineInfo):
         self.session.close()
         self.session = None
 
-    def get_summary_stats_for_layer(self, layer):
-        SQL_TEMPLATE = """
-            SELECT
-                MIN(sq.q),
-                MAX(sq.q),
-                STDDEV(sq.q)
-            FROM ({query}) AS sq"""
-
-        (min_value, max_value, stddev) = self.session.execute(SQL_TEMPLATE.format(query=layer["_postgis_query"])).first()
-
-        return {
-            "min": min_value or 0,
-            "max": max_value or 0,
-            "stddev": stddev or 0,
-        }
-
-    def get_bbox_for_layer(self, layer):
-        SQL_TEMPLATE = """
-            SELECT
-                ST_XMin(latlon_bbox) AS minx,
-                ST_XMax(latlon_bbox) AS maxx,
-                ST_YMin(latlon_bbox) AS miny,
-                ST_YMax(latlon_bbox) as maxy
-            FROM (
-                SELECT
-                    -- Eugh
-                    Box2D(ST_GeomFromText(ST_AsText(ST_Transform(ST_SetSRID(ST_Extent(geom_3857), 3857), 4326)))) AS latlon_bbox
-                FROM (
-                    {query}
-                ) AS exp
-            ) AS bbox;
-        """
-
-        return dict(self.session.execute(SQL_TEMPLATE.format(query=layer["_postgis_query"])).first())
-
-    def get_summary_stats_for_column(self, column, table):
-        SQL_TEMPLATE = """
-            SELECT
-                MIN(sq.q),
-                MAX(sq.q),
-                STDDEV(sq.q)
-            FROM (SELECT {col_name} AS q FROM {schema_name}.{table_name}) AS sq"""
-
-        (min, max, stddev) = self.session.execute(SQL_TEMPLATE.format(col_name=column.name, schema_name=self._schema_name, table_name=table.name)).first()
-
-        return {
-            "min": min,
-            "max": max,
-            "stddev": stddev,
-        }
-
 
 class SchemaAccess(DataAccess):
     """
