@@ -519,7 +519,8 @@ class DataLoaderFactory:
         return SchemaAccess(reflect)
 
     def make_loader(self, schema_name, **loader_kwargs):
-        self._create_schema(schema_name)
+        if not self.engine.dialect.has_schema(self.engine, schema_name):
+            self._create_schema(schema_name)
         return DataLoader(self.engine, schema_name, **loader_kwargs)
 
     def _create_database(self, connection_string, clean):
