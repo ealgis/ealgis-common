@@ -711,10 +711,19 @@ class DataLoader(SchemaAccess):
         self.session.add(linkage)
         self.session.commit()
 
+    def has_dependency(self, required_schema):
+        with SchemaAccess(SchemaReflection(required_schema, self.engine)) as dep_access:
+            metadata_cls = dep_access.get_table_class('ealgis_metadata')
+            metadata = self.session.query(metadata_cls).one()
+            Dependencies = self.classes['dependencies']
+            return True if self.session.query(Dependencies).filter(Dependencies.uuid == metadata.uuid).one_or_none() is not None else False
+
     def add_dependency(self, required_schema):
         with SchemaAccess(SchemaReflection(required_schema, self.engine)) as dep_access:
             metadata_cls = dep_access.get_table_class('ealgis_metadata')
             metadata = self.session.query(metadata_cls).one()
+
+            if self.has_dependency(required_schema) is False:
             Dependencies = self.classes['dependencies']
             self.session.add(Dependencies(
                 name=required_schema,
