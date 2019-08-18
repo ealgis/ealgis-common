@@ -724,16 +724,24 @@ class DataLoader(SchemaAccess):
             metadata = self.session.query(metadata_cls).one()
 
             if self.has_dependency(required_schema) is False:
-            Dependencies = self.classes['dependencies']
-            self.session.add(Dependencies(
-                name=required_schema,
-                uuid=metadata.uuid))
-            self.session.commit()
+                Dependencies = self.classes['dependencies']
+                self.session.add(Dependencies(
+                    name=required_schema,
+                    uuid=metadata.uuid))
+                self.session.commit()
+
+    def has_metadata(self):
+        EALGISMetadata = self.classes['ealgis_metadata']
+        return True if self.session.query(EALGISMetadata).one_or_none() is not None else False
 
     def set_metadata(self, **kwargs):
         self.session.execute(
             self.tables['ealgis_metadata'].insert().values(**kwargs))
         self.session.commit()
+    
+    def is_table_registered(self, table_name):
+        TableInfo = self.classes['table_info']
+        return True if self.session.query(TableInfo).filter(TableInfo.name == table_name).one_or_none() is not None else False
 
     def result(self):
         return DataLoaderResult(
