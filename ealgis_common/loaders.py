@@ -6,7 +6,9 @@ import subprocess
 import fnmatch
 import glob
 import re
+import urllib.request
 from shutil import rmtree
+from urllib.parse import urlparse
 from .util import piperun, table_name_valid, make_logger
 
 from .seqclassifier import SequenceClassifier
@@ -76,6 +78,28 @@ class ZipAccess(DirectoryAccess):
         if self._unpacked:
             rmtree(self._directory)
         return super(ZipAccess, self).__exit__(type, value, traceback)
+
+
+class WebZipAccess(ZipAccess):
+    def __init__(self, parent, tmpdir, url):
+        self._parent, self._tmpdir, self._url = parent, tmpdir, url
+        self._unpacked = False
+        self._downloaded = False
+        self._dlpath = os.path.join(self._tmpdir, hashlib.sha1(self._url.encode('utf8')).hexdigest())
+
+    def _unpack(self):
+        os.makedirs(self._dlpath)
+        filename = os.path.basename(urlparse(self._url).path)
+        zf_path, headers = urllib.request.urlretrieve(self._url, os.path.join(self._dlpath, filename))
+        self._downloaded = True
+
+        super().__init__(None, self._tmpdir, zf_path)
+        return super()._unpack()
+
+    def __exit__(self, type, value, traceback):
+        if self._downloaded:
+            rmtree(self._dlpath)
+        return super().__exit__(type, value, traceback)
 
 
 class RewrittenCSV(object):
