@@ -144,18 +144,33 @@ class ShapeLoader(GeoDataLoader):
         self.srid = srid
 
     def load(self, eal):
-        shp_cmd = ['shp2pgsql', '-s', str(self.srid), '-t', '2D', '-I', self.shppath, self.schema_name + '.' + self.table_name]
-        os.environ['PGPASSWORD'] = eal.dbpassword()
-        _, _, code = piperun(shp_cmd, [
-            'psql',
-            '-h', eal.dbhost(),
-            '-U', eal.dbuser(),
-            '-p', str(eal.dbport()),
-            '-q', eal.dbname()])
-        if code != 0:
+        ogr_cmd = [
+            'ogr2ogr',
+            '-f', 'postgresql',
+            'PG:dbname=\'{}\' host=\'{}\' port=\'{}\' user=\'{}\' password=\'{}\''.format(
+                eal.dbname(),
+                eal.dbhost(),
+                eal.dbport(),
+                eal.dbuser(),
+                eal.dbpassword()),
+            self.shppath,
+            '-nln', self.table_name,
+            '-nlt', 'PROMOTE_TO_MULTI',
+            '-append',
+            '-lco', 'fid=gid',
+            '-lco', 'schema={}'.format(self.schema_name),
+            '-lco', 'geometry_name=geom',
+            # Getting "does not support layer creation option" errors from GDAL 2.4.0 for these layer creation options. Documentation states they were added in GDAL 1.10.0/1.11 though... *shrugs*
+            # '-lco', '2GB_LIMIT=YES',
+            # '-lco', 'RESIZE=YES',
+        ]
+        logger.debug(ogr_cmd)
+        try:
+            subprocess.check_call(ogr_cmd)
+        except subprocess.CalledProcessError:
             raise LoaderException("load of %s failed." % self.shpname)
         # make the meta info
-        logger.info("registering, table name is: %s" % (self.table_name))
+        logger.debug("registering, table name is: %s" % (self.table_name))
         eal.register_table(self.table_name, geom=True, srid=self.srid, gid='gid')
 
 
@@ -249,7 +264,7 @@ class MapInfoLoader(GeoDataLoader):
         except subprocess.CalledProcessError:
             raise LoaderException("load of %s failed." % os.path.basename(self.filename))
         # make the meta info
-        logger.info("registering, table name is: %s" % (self.table_name))
+        logger.debug("registering, table name is: %s" % (self.table_name))
         eal.register_table(self.table_name, geom=True, gid='gid')
 
 
