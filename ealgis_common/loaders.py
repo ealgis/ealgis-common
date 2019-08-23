@@ -159,6 +159,43 @@ class ShapeLoader(GeoDataLoader):
         eal.register_table(self.table_name, geom=True, srid=self.srid, gid='gid')
 
 
+class GeoPackageLoader(GeoDataLoader):
+    def __init__(self, schema_name, filename, layer_name, table_name=None):
+        self.schema_name = schema_name
+        self.filename = filename
+        self.layer_name = layer_name
+        self.table_name = table_name or GeoDataLoader.generate_table_name(self.get_file_base(filename))
+        if not table_name_valid(self.table_name):
+            raise LoaderException("table name is `%s' is invalid." % self.table_name)
+
+    def load(self, eal):
+        ogr_cmd = [
+            'ogr2ogr',
+            '-f', 'postgresql',
+            'PG:dbname=\'{}\' host=\'{}\' port=\'{}\' user=\'{}\' password=\'{}\''.format(
+                eal.dbname(),
+                eal.dbhost(),
+                eal.dbport(),
+                eal.dbuser(),
+                eal.dbpassword()),
+            self.filename,
+            '-nln', self.table_name,
+            '-append',
+            '-lco', 'fid=gid',
+            '-lco', 'schema={}'.format(self.schema_name),
+            '-lco', 'geometry_name=geom',
+            self.layer_name
+        ]
+        logger.debug(ogr_cmd)
+        try:
+            subprocess.check_call(ogr_cmd)
+        except subprocess.CalledProcessError:
+            raise LoaderException("load of %s failed." % os.path.basename(self.filename))
+        # make the meta info
+        logger.debug("registering, table name is: %s" % (self.table_name))
+        eal.register_table(self.table_name, geom=True, gid='gid')
+
+
 class MapInfoLoader(GeoDataLoader):
     tab_re = re.compile(fnmatch.translate("*.tab"), re.IGNORECASE)
     mif_re = re.compile(fnmatch.translate("*.mif"), re.IGNORECASE)
@@ -221,7 +258,7 @@ class KMLLoader(GeoDataLoader):
         self.srid = 4326  # WGS84
         self.schema_name = schema_name
         self.filename = filename
-        self.table_name = table_name or GeoDataLoader.generate_table_name(MapInfoLoader.get_file_base(filename))
+        self.table_name = table_name or GeoDataLoader.generate_table_name(self.get_file_base(filename))
         if not table_name_valid(self.table_name):
             raise LoaderException("table name is `%s' is invalid." % self.table_name)
 
