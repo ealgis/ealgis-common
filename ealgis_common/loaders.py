@@ -181,6 +181,8 @@ class ShapeLoader(GeoDataLoader):
             '-nln', self.table_name,
             '-nlt', 'PROMOTE_TO_MULTI',
             '-append',
+            # Handle Shapefiles that don't have a .prj file
+            '-a_srs', 'EPSG:{}'.format(self.srid),
             '-lco', 'fid=gid',
             '-lco', 'schema={}'.format(self.schema_name),
             '-lco', 'geometry_name=geom',
