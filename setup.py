@@ -9,9 +9,9 @@ setup(
     long_description="EAlGIS data schema",
     license="GPL3",
     keywords="ealgis",
-    url="https://github.com/ealgis/ealgis-data-schema",
+    url="https://github.com/ealgis/ealgis-common",
     name="ealgis_common",
-    version="0.8.3",
+    version="0.8.4",
     packages=find_packages(exclude=["*.tests", "*.tests.*", "tests.*", "tests"]),
     install_requires=install_requires,
 )
