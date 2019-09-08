@@ -11,7 +11,7 @@ setup(
     keywords="ealgis",
     url="https://github.com/ealgis/ealgis-common",
     name="ealgis_common",
-    version="0.8.4",
+    version="0.8.5",
     packages=find_packages(exclude=["*.tests", "*.tests.*", "tests.*", "tests"]),
     install_requires=install_requires,
 )
