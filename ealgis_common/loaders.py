@@ -180,6 +180,7 @@ class ShapeLoader(GeoDataLoader):
             self.shppath,
             '-nln', self.table_name,
             '-nlt', 'PROMOTE_TO_MULTI',
+            '-lco', 'precision=NO',
             '-append',
             # Handle Shapefiles that don't have a .prj file
             '-a_srs', 'EPSG:{}'.format(self.srid),
